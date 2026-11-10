@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Pre-commit gate: formatting and unit tests. Enable with `just install-hooks`.
+# The full suite (integration tests, clippy, Nix flake, doc links) runs in CI.
+set -euo pipefail
+
+# GUI git clients start with a minimal PATH; make rustup's cargo and Nix profiles reachable.
+export PATH="$HOME/.cargo/bin:$HOME/.nix-profile/bin:/nix/var/nix/profiles/default/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+
+cargo fmt --all -- --check
+cargo test --workspace --bins --quiet

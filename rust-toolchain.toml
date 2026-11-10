@@ -1,0 +1,5 @@
+[toolchain]
+# Concrete pin (not floating "stable") so local builds, CI and the Nix flake (which reads this file via
+# rust-overlay) all use one compiler. Kept in step with thepia/cli. Bump deliberately.
+channel = "1.98.1"
+components = ["rustfmt", "clippy"]

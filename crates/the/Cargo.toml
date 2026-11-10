@@ -1,0 +1,20 @@
+[package]
+name = "the"
+description = "Thepia command line for Linux and Nix"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[[bin]]
+name = "the"
+path = "src/main.rs"
+
+[dependencies]
+anstyle.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+yaml-rust2.workspace = true

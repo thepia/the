@@ -1,0 +1,15 @@
+# Rust
+/target
+
+# Nix
+/result
+/result-*
+
+# Local scratch: plans, design sketches and cross-agent exchanges. Never committed; the durable
+# record lives in docs/ (see docs/skills-search.md).
+docs/scratch/
+
+# OS / editor
+.DS_Store
+.idea/
+*.swp
