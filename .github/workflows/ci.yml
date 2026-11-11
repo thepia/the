@@ -48,9 +48,7 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
-      - name: Harness self-test (validates oracle + plumbing for claude and gemini)
-        run: |
-          python3 .claude/skills/agent-skills/scripts/eval-resolution.py --self-test --agent claude
-          python3 .claude/skills/agent-skills/scripts/eval-resolution.py --self-test --agent gemini
+      - name: Harness self-test (validates oracle + plumbing for claude, gemini, and opencode)
+        run: python3 .claude/skills/agent-skills/scripts/eval-resolution.py --self-test --agent all
       - name: Live eval against real agents (skips cleanly without an authenticated agent)
-        run: python3 .claude/skills/agent-skills/scripts/eval-resolution.py --agent auto
+        run: python3 .claude/skills/agent-skills/scripts/eval-resolution.py --agent all

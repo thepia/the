@@ -1,0 +1,415 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Run complete dry-run only (skip CDN upload, git tag, GitHub Release, Homebrew, and Nix publish)"
+        required: false
+        default: true
+        type: boolean
+      force:
+        description: "Run dry-run even if Cargo.toml version is already tagged and released"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    name: Check version & release status
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.meta.outputs.should_run }}
+      dry_run: ${{ steps.meta.outputs.dry_run }}
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check if Cargo.toml version is already tagged and released
+        id: meta
+        run: |
+          version="$(python3 -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("Cargo.toml").read_text())["workspace"]["package"]["version"])')"
+          tag="v${version}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+          already_tagged=false
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null 2>&1 || \
+             git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+            already_tagged=true
+          fi
+
+          already_released=false
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            already_released=true
+          fi
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            dry_run="${{ inputs.dry_run }}"
+            force="${{ inputs.force }}"
+            if [[ "$already_tagged" == "true" || "$already_released" == "true" ]]; then
+              if [[ "$dry_run" == "true" || "$force" == "true" ]]; then
+                echo "::notice::${tag} already exists (tagged=${already_tagged}, released=${already_released}); running in dry-run mode."
+                echo "should_run=true" >> "$GITHUB_OUTPUT"
+                echo "dry_run=true" >> "$GITHUB_OUTPUT"
+              else
+                echo "::notice::${tag} is already tagged and released; skipping."
+                echo "should_run=false" >> "$GITHUB_OUTPUT"
+                echo "dry_run=true" >> "$GITHUB_OUTPUT"
+              fi
+            else
+              echo "should_run=true" >> "$GITHUB_OUTPUT"
+              echo "dry_run=${dry_run}" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            # Push to main: only run when Cargo.toml version has not been tagged or released yet.
+            if [[ "$already_tagged" == "true" || "$already_released" == "true" ]]; then
+              echo "::notice::Version ${tag} is already tagged (tagged=${already_tagged}) or released (released=${already_released}); skipping release pipeline."
+              echo "should_run=false" >> "$GITHUB_OUTPUT"
+              echo "dry_run=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "::notice::Version ${tag} is not yet tagged or released; starting full dry-run and release pipeline."
+              echo "should_run=true" >> "$GITHUB_OUTPUT"
+              echo "dry_run=false" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+  gate:
+    name: Dry-run gate (fmt, clippy, test, cargo package)
+    needs: check
+    if: needs.check.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - run: cargo publish --dry-run -p thepia --allow-dirty
+
+  build:
+    name: Dry-run build (${{ matrix.target }})
+    needs: [check, gate]
+    if: needs.check.outputs.should_run == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            native: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            native: false
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            native: true
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            native: false
+            linker: aarch64-linux-gnu-gcc
+            cc_pkg: gcc-aarch64-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cross-compilation toolchain
+        if: matrix.cc_pkg != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.cc_pkg }}
+
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build release binary
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.linker }}
+        run: cargo build --workspace --release --locked --target ${{ matrix.target }}
+
+      - name: Smoke-test built binary on native host
+        if: matrix.native
+        run: |
+          "target/${{ matrix.target }}/release/thepia" --version
+          "target/${{ matrix.target }}/release/the" --version
+          "target/${{ matrix.target }}/release/th" --version
+          "target/${{ matrix.target }}/release/the" skills list
+
+      - name: Package archive and SHA-256
+        run: |
+          ver="${{ needs.check.outputs.version }}"
+          target="${{ matrix.target }}"
+          stage="thepia-v${ver}-${target}"
+          mkdir -p "dist/${stage}"
+          cp "target/${target}/release/thepia" "dist/${stage}/thepia"
+          cp "target/${target}/release/the" "dist/${stage}/the"
+          cp "target/${target}/release/th" "dist/${stage}/th"
+          cp README.md docs/LICENSE-MIT docs/LICENSE-APACHE "dist/${stage}/"
+          tar -C dist -czf "dist/${stage}.tar.gz" "${stage}"
+          (cd dist && shasum -a 256 "${stage}.tar.gz" > "${stage}.tar.gz.sha256")
+
+      - name: Upload archive artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: archive-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+
+  nix:
+    name: Dry-run Nix flake (${{ matrix.os }})
+    needs: [check, gate]
+    if: needs.check.outputs.should_run == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v31
+
+      - name: Verify Nix flake check and release build
+        run: |
+          nix flake check -L
+          nix build .#default -L
+          ./result/bin/the --version
+          ./result/bin/the skills list
+
+  package:
+    name: Assemble release bundle & Homebrew formula
+    needs: [check, build, nix]
+    if: needs.check.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download release archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: archive-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS, release.json, and Homebrew formula (thepia.rb)
+        env:
+          VERSION: ${{ needs.check.outputs.version }}
+          TAG: ${{ needs.check.outputs.tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          cd dist
+          cat *.tar.gz.sha256 | sort -k2 > SHA256SUMS
+          cat SHA256SUMS
+
+          sha_for() {
+            local sha
+            sha="$(awk -v pat="thepia-v${VERSION}-${1}.tar.gz" '$2 == pat { print $1 }' SHA256SUMS)"
+            if [[ -z "$sha" ]]; then
+              echo "::error::Missing SHA-256 for target ${1}"
+              exit 1
+            fi
+            printf '%s' "$sha"
+          }
+
+          sha_darwin_arm64="$(sha_for aarch64-apple-darwin)"
+          sha_darwin_x86_64="$(sha_for x86_64-apple-darwin)"
+          sha_linux_arm64="$(sha_for aarch64-unknown-linux-gnu)"
+          sha_linux_x86_64="$(sha_for x86_64-unknown-linux-gnu)"
+
+          cat > thepia.rb <<EOF
+          class Thepia < Formula
+            desc "Thepia command line for Linux, macOS, and Nix"
+            homepage "https://github.com/${REPO}"
+            version "${VERSION}"
+            license any_of: ["MIT", "Apache-2.0"]
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "https://github.com/${REPO}/releases/download/${TAG}/thepia-v${VERSION}-aarch64-apple-darwin.tar.gz"
+                sha256 "${sha_darwin_arm64}"
+              else
+                url "https://github.com/${REPO}/releases/download/${TAG}/thepia-v${VERSION}-x86_64-apple-darwin.tar.gz"
+                sha256 "${sha_darwin_x86_64}"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url "https://github.com/${REPO}/releases/download/${TAG}/thepia-v${VERSION}-aarch64-unknown-linux-gnu.tar.gz"
+                sha256 "${sha_linux_arm64}"
+              else
+                url "https://github.com/${REPO}/releases/download/${TAG}/thepia-v${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+                sha256 "${sha_linux_x86_64}"
+              end
+            end
+
+            def install
+              bin.install "thepia"
+              bin.install_symlink "thepia" => "the" unless (HOMEBREW_PREFIX/"bin/the").exist?
+              bin.install_symlink "thepia" => "th" unless (HOMEBREW_PREFIX/"bin/th").exist?
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/thepia --version")
+            end
+          end
+          EOF
+
+          python3 - "${VERSION}" "https://cdn.thepia.com/the/${VERSION}" "SHA256SUMS" > release.json <<'PY'
+          import datetime, json, sys
+          from pathlib import Path
+
+          version, base_url, sums_path = sys.argv[1], sys.argv[2], Path(sys.argv[3])
+          assets = []
+          for line in Path(sums_path).read_text().splitlines():
+              parts = line.split()
+              if len(parts) == 2:
+                  sha256, name = parts
+                  assets.append({
+                      "name": name,
+                      "url": f"{base_url}/{name}",
+                      "sha256": sha256,
+                  })
+          print(json.dumps({
+              "package": "thepia",
+              "version": version,
+              "tag": f"v{version}",
+              "published_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "base_url": base_url,
+              "assets": assets,
+          }, indent=2))
+          PY
+
+      - name: Upload complete release bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-bundle-${{ needs.check.outputs.tag }}
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+            dist/SHA256SUMS
+            dist/release.json
+            dist/thepia.rb
+
+  # Runs ONLY after the complete dry-run (gate + build + nix + package) succeeds on main.
+  publish:
+    name: Upload to cdn.thepia.com, tag commit, and release (GitHub & Homebrew)
+    needs: [check, gate, build, nix, package]
+    if: needs.check.outputs.should_run == 'true' && needs.check.outputs.dry_run == 'false'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download verified release bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: release-bundle-${{ needs.check.outputs.tag }}
+          path: dist
+
+      - name: Upload package to cdn.thepia.com
+        env:
+          BUNNY_UPLOAD_PW: ${{ secrets.BUNNY_UPLOAD_PW }}
+          BUNNY_API_KEY: ${{ secrets.BUNNY_API_KEY }}
+          VERSION: ${{ needs.check.outputs.version }}
+        run: ./scripts/deploy-cdn.sh "${VERSION}" dist
+
+      - name: Tag commit with version (${{ needs.check.outputs.tag }})
+        env:
+          TAG: ${{ needs.check.outputs.tag }}
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${TAG}" "${{ github.sha }}" -m "thepia v${VERSION}"
+          git push origin "refs/tags/${TAG}"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.check.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: "thepia ${{ needs.check.outputs.tag }}"
+          generate_release_notes: true
+          files: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+            dist/SHA256SUMS
+            dist/release.json
+            dist/thepia.rb
+
+      - name: Check for HOMEBREW_TAP_TOKEN
+        id: tap_check
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [[ -z "$TAP_TOKEN" ]]; then
+            echo "::notice::HOMEBREW_TAP_TOKEN secret is not set; skipping automatic push to Thepia/homebrew-tap."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout Thepia/homebrew-tap
+        if: steps.tap_check.outputs.enabled == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.HOMEBREW_TAP_REPO || 'Thepia/homebrew-tap' }}
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+
+      - name: Push Formula/thepia.rb to Homebrew tap
+        if: steps.tap_check.outputs.enabled == 'true'
+        env:
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          mkdir -p homebrew-tap/Formula
+          cp dist/thepia.rb homebrew-tap/Formula/thepia.rb
+          cd homebrew-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/thepia.rb
+          if git diff --cached --quiet; then
+            echo "Formula/thepia.rb is already up to date."
+          else
+            git commit -m "thepia ${VERSION}"
+            git push
+          fi
+
+  nix-publish:
+    name: Push Nix binary cache (${{ matrix.os }})
+    needs: [check, publish]
+    if: needs.check.outputs.should_run == 'true' && needs.check.outputs.dry_run == 'false' && vars.CACHIX_CACHE != '' && secrets.CACHIX_AUTH_TOKEN != ''
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.check.outputs.tag }}
+
+      - uses: cachix/install-nix-action@v31
+
+      - uses: cachix/cachix-action@v15
+        with:
+          name: ${{ vars.CACHIX_CACHE }}
+          authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
+
+      - name: Build tagged release and push to Cachix
+        run: nix build .#default -L

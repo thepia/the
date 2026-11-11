@@ -57,15 +57,39 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+export PATH="$PATH:$HOME/.opencode/bin:$HOME/.bun/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin"
+
+if [ "$agent" = "all" ]; then
+  overall_rc=0
+  ran=0
+  for cand in claude gemini opencode; do
+    if command -v "$cand" >/dev/null 2>&1; then
+      ran=1
+      echo "============================================================"
+      "$0" --agent "$cand" ${model_arg:+--model "$model_arg"} || overall_rc=1
+      echo
+    else
+      echo "[SKIP] $cand: binary not found on PATH"
+    fi
+  done
+  if [ "$ran" = 0 ]; then
+    echo "probe-claude-resolution: none of claude, gemini, or opencode is on PATH" >&2
+    exit 3
+  fi
+  exit "$overall_rc"
+fi
+
 if [ "$agent" = "auto" ]; then
   case "$model_arg" in
     gemini*) agent="gemini" ;;
     haiku|sonnet|opus|claude*) agent="claude" ;;
     *)
-      if command -v claude >/dev/null 2>&1; then
-        agent="claude"
-      elif command -v gemini >/dev/null 2>&1; then
+      if command -v gemini >/dev/null 2>&1; then
         agent="gemini"
+      elif command -v opencode >/dev/null 2>&1; then
+        agent="opencode"
+      elif command -v claude >/dev/null 2>&1; then
+        agent="claude"
       else
         agent="claude"
       fi
@@ -86,6 +110,8 @@ fi
 
 if [ "$agent" = "gemini" ]; then
   model="${model_arg:-${GEMINI_MODEL:-gemini-2.5-flash}}"
+elif [ "$agent" = "opencode" ]; then
+  model="${model_arg:-none (zero-API debug skill)}"
 else
   model="${model_arg:-${CLAUDE_MODEL:-haiku}}"
 fi
@@ -143,13 +169,18 @@ if [ "$agent" = "gemini" ]; then
   raw="$(cd "$app" && GEMINI_CLI_TRUSTED_FOLDERS_PATH="$tf" GEMINI_CLI_HOME="$work" gemini skills list 2>/dev/null || true)"
   out="$(awk '/^[[:space:]]*marker-[a-z0-9-]+/{print "SKILL: " $1}' <<<"$raw")"
   if [ -z "$out" ]; then out="SKILL: none"; fi
+elif [ "$agent" = "opencode" ]; then
+  echo "Running zero-API 'opencode debug skill' from $app ..."
+  raw="$(cd "$app" && HOME="$work" opencode debug skill 2>/dev/null || true)"
+  out="$(grep -oE 'marker-[a-z0-9-]+' <<<"$raw" | sort -u | awk '{print "SKILL: " $1}')"
+  if [ -z "$out" ]; then out="SKILL: none"; fi
 else
   echo "Running claude --setting-sources project --model $model -p from $app ..."
   out="$(cd "$app" && claude --setting-sources project --model "$model" -p "$prompt" 2>&1 || true)"
   if grep -qiE "hit your .*limit|hour limit|rate[_ ]limit|quota exceeded|resource_exhausted|credit balance" <<<"$out"; then
     echo "[RATE LIMIT] claude ($model) quota reached:" >&2
     echo "  $(head -n 1 <<<"$out")" >&2
-    echo "  Tip: run '$0 --agent gemini' (zero API calls) while waiting for reset." >&2
+    echo "  Tip: run '$0 --agent gemini' or '$0 --agent opencode' (zero API calls) while waiting for reset." >&2
     exit 0
   fi
 fi

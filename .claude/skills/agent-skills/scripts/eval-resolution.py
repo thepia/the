@@ -1,47 +1,53 @@
 #!/usr/bin/env python3
 """eval-resolution: an ongoing conformance eval of the skill's model of Claude
-Code and Gemini CLI skill resolution against the real installed agent.
+Code, Gemini CLI, and OpenCode skill resolution against the real installed
+agents.
 
 The skill and docs/skills-search.md claim how coding agents resolve project
 skills. Agents change between versions, so a claim is only trustworthy if it is
 re-checked against reality. This runner encodes each claim as a CASE with a
-fixture and an expected set of skills visible at startup, drives the real
-`claude` or `gemini` binary to report what it actually sees, and fails on any
-divergence. Run it in CI or on a schedule: when an agent release changes
-behavior, this goes red and tells you the skill and the doc are now stale.
+fixture and an expected set of skills visible at startup, drives every
+installed agent binary (`claude`, `gemini`, `opencode`) to report what it
+actually sees, and fails on any divergence. Run it in CI or on a schedule: when
+an agent release changes behavior, this goes red and tells you the skill and
+the doc are now stale.
 
 Cases:
   parent-walk   markers at cwd, repo root, an intermediate parent, above the
-                repo-root boundary, and below cwd. Claude Code loads cwd +
-                parents up to repo root; Gemini CLI loads cwd only.
+                repo-root boundary, and below cwd. Claude Code and OpenCode load
+                cwd + parents up to repo root; Gemini CLI loads cwd only.
   depth-limit   a skill nested two levels below `.claude/skills/`
-                (`.claude/skills/nested/marker-deep/SKILL.md`) is ignored by
-                Claude Code and Gemini CLI, which only read `<root>/<name>/SKILL.md`.
+                (`.claude/skills/group/marker-deep-nested/SKILL.md`) is ignored
+                by Claude Code and Gemini CLI (1 level deep), and loaded by
+                OpenCode (`**/SKILL.md`).
   symlink       a skill directory reached via a symlink inside `.claude/skills/`
                 is followed and loaded.
   name-default  a skill dir with no `name:` field loads under its directory name
-                in Claude Code, and is skipped by Gemini CLI.
+                in Claude Code, and is skipped by Gemini CLI and OpenCode.
   lenient-yaml  a skill whose frontmatter is not strict YAML still loads in both
-                Claude Code and Gemini CLI (fallback line parser).
+                Claude Code and Gemini CLI (fallback line parser), and is
+                skipped by OpenCode's strict YAML parser.
 
-Agents other than Claude Code and Gemini CLI are declared pending here on
-purpose (honesty over coverage): OpenCode and Goose need their own enumeration
-adapter, added when we can drive them. They are reported as skipped, never as
+Agents other than Claude Code, Gemini CLI, and OpenCode are declared pending
+here on purpose (honesty over coverage): Goose needs its own enumeration
+adapter, added when we can drive it. It is reported as pending, never as
 passing.
 
 Modes:
-  (default)     drive the real `claude` or `gemini` binary depending on
-                `--agent` (`auto`, `claude`, `gemini`) and what is available on
-                PATH. Defaults to `--model haiku` for Claude (override with
-                `--model sonnet` or `CLAUDE_MODEL`) and `--model gemini-2.5-flash`
-                for Gemini (override with `GEMINI_MODEL`). Skips cleanly if no
-                usable agent is available.
+  (default)     drive all installed agent binaries (`claude`, `gemini`,
+                `opencode`) when `--agent all` or `--agent auto` is used, or a
+                single agent when `--agent claude|gemini|opencode` is passed.
+                Uses zero-API local skill listing for Gemini (`gemini skills
+                list`) and OpenCode (`opencode debug skill`), and a single
+                `--model haiku` call for Claude (override with `--model sonnet`
+                or `CLAUDE_MODEL`). Skips missing or rate-limited binaries
+                cleanly.
   --self-test   use the documented-behavior oracle (claude-skill-dirs.py) as a
                 stand-in to prove the harness plumbing end to end without an
                 agent. This validates wiring, NOT the real world.
 
 Usage:
-  python3 eval-resolution.py [--self-test] [--agent auto|claude|gemini] [--model MODEL] [--json] [--keep] [--results-dir DIR]
+  python3 eval-resolution.py [--self-test] [--agent all|auto|claude|gemini|opencode] [--model MODEL] [--json] [--keep] [--results-dir DIR]
 Exit: 0 all checked cases pass (or all skipped), 1 any mismatch, 2 usage.
 """
 
@@ -57,6 +63,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ORACLE = HERE / "claude-skill-dirs.py"
+ALL_AGENTS = ("claude", "gemini", "opencode")
 DEFAULT_MODELS = {
     "claude": "haiku",
     "gemini": "gemini-2.5-flash",
@@ -183,17 +190,30 @@ def find_binary(binary: str) -> str:
     found = shutil.which(binary)
     if found:
         return found
-    if binary == "opencode":
-        for candidate in (
-            Path.home() / ".opencode" / "bin" / "opencode",
-            Path.home() / ".bun" / "bin" / "opencode",
-            Path.home() / ".local" / "bin" / "opencode",
-        ):
-            try:
-                if candidate.is_file():
-                    return str(candidate)
-            except OSError:
-                continue
+    try:
+        home = Path.home()
+    except OSError:
+        home = None
+    candidates = []
+    if home is not None:
+        if binary == "opencode":
+            candidates.extend([
+                home / ".opencode" / "bin" / "opencode",
+                home / ".bun" / "bin" / "opencode",
+            ])
+        elif binary == "claude":
+            candidates.append(home / ".claude" / "local" / "claude")
+        candidates.append(home / ".local" / "bin" / binary)
+    candidates.extend([
+        Path("/opt/homebrew/bin") / binary,
+        Path("/usr/local/bin") / binary,
+    ])
+    for candidate in candidates:
+        try:
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate)
+        except OSError:
+            continue
     return binary
 
 
@@ -234,10 +254,17 @@ def enumerate_opencode(launch: Path, model: str, use_llm: bool = False):
     if not use_llm:
         # Zero-API path: `opencode debug skill` dumps the JSON array from Skill.all()
         # directly to stdout without making any LLM calls.
-        proc = subprocess.run(
-            [exe, "debug", "skill"], cwd=str(launch),
-            capture_output=True, text=True,
-        )
+        empty_home = launch / ".opencode-empty-home"
+        empty_home.mkdir(exist_ok=True)
+        env = dict(os.environ)
+        env["HOME"] = str(empty_home)
+        try:
+            proc = subprocess.run(
+                [exe, "debug", "skill"], cwd=str(launch),
+                env=env, capture_output=True, text=True,
+            )
+        finally:
+            shutil.rmtree(empty_home, ignore_errors=True)
         out = proc.stdout.strip()
         seen = set()
         # Try JSON parse first (array of {"name": ...}); fall back to regex scan
@@ -344,36 +371,18 @@ def gemini_has_auth() -> bool:
     return False
 
 
-def select_agent(requested: str, model_arg, use_llm: bool = False):
-    """Return (agent, version, skip_reason)."""
-    if requested == "auto" and model_arg:
+def resolve_target_agents(requested: str, model_arg):
+    """Return the list of agents to evaluate."""
+    if requested in ("all", "auto") and model_arg:
         if model_arg.startswith("gemini"):
-            requested = "gemini"
-        elif model_arg in ("haiku", "sonnet", "opus") or model_arg.startswith("claude"):
-            requested = "claude"
-
-    # In auto mode without --llm, prefer gemini first since `gemini skills list`
-    # verifies live skill discovery with zero API calls.
-    candidates = (["gemini", "claude"] if not use_llm else ["claude", "gemini"]) if requested == "auto" else [requested]
-    for cand in candidates:
-        ver = agent_version(cand)
-        if ver is None:
-            continue
-        if cand == "gemini" and use_llm and not gemini_has_auth():
-            continue
-        return cand, ver, None
-
-    if requested == "gemini" and use_llm and agent_version("gemini") is not None:
-        return "gemini", None, (
-            "eval-resolution: 'gemini' is on PATH but --llm was requested without "
-            "Gemini auth/credentials (omit --llm to use zero-API `gemini skills list`)."
-        )
-    return (requested if requested != "auto" else "claude"), None, (
-        "eval-resolution: neither 'claude' nor 'gemini' is available on PATH, "
-        "cannot run the real-world eval here. Run from a terminal where "
-        "'claude --version' or 'gemini --version' works, or use --self-test "
-        "to validate harness plumbing."
-    )
+            return ["gemini"]
+        if model_arg in ("haiku", "sonnet", "opus") or model_arg.startswith("claude"):
+            return ["claude"]
+        if "/" in model_arg:
+            return ["opencode"]
+    if requested in ("all", "auto"):
+        return list(ALL_AGENTS)
+    return [requested]
 
 
 def run(agent: str, enumerate_fn, keep: bool):
@@ -397,17 +406,105 @@ def run(agent: str, enumerate_fn, keep: bool):
     return results
 
 
+def eval_single_agent(agent: str, *, self_test: bool, use_llm: bool, model_arg, keep: bool, stamp: str):
+    ver = agent_version(agent)
+    if self_test:
+        mode = f"self-test ({agent} oracle plumbing only)"
+        results = run(agent, lambda launch: enumerate_oracle(launch, agent), keep)
+        return {
+            "agent": agent,
+            "mode": mode,
+            "when": stamp,
+            "agent_version": ver,
+            "claude_version": ver if agent == "claude" else None,
+            "model": None,
+            "skipped": False,
+            "rate_limited": False,
+            "results": results,
+            "passed": all(r["passed"] for r in results),
+        }
+
+    if ver is None:
+        return {
+            "agent": agent,
+            "mode": f"live {agent}",
+            "when": stamp,
+            "agent_version": None,
+            "model": None,
+            "skipped": True,
+            "rate_limited": False,
+            "reason": f"'{agent}' binary not found on PATH",
+            "results": [],
+            "passed": True,
+        }
+
+    if agent == "gemini" and use_llm and not gemini_has_auth():
+        return {
+            "agent": agent,
+            "mode": f"live {agent} (llm)",
+            "when": stamp,
+            "agent_version": ver,
+            "model": None,
+            "skipped": True,
+            "rate_limited": False,
+            "reason": "--llm requested without Gemini auth/credentials",
+            "results": [],
+            "passed": True,
+        }
+
+    env_key = "GEMINI_MODEL" if agent == "gemini" else ("OPENCODE_MODEL" if agent == "opencode" else "CLAUDE_MODEL")
+    zero_api = (agent in ("gemini", "opencode")) and not use_llm
+    model = "none (zero-API skill dump)" if zero_api else (model_arg or os.environ.get(env_key, DEFAULT_MODELS[agent]))
+    mode = f"live {agent} ({'zero-API skill dump' if zero_api else 'llm'})"
+    if agent == "gemini":
+        enumerate_fn = lambda launch: enumerate_gemini(launch, model, use_llm=use_llm)
+    elif agent == "opencode":
+        enumerate_fn = lambda launch: enumerate_opencode(launch, model, use_llm=use_llm)
+    else:
+        enumerate_fn = lambda launch: enumerate_claude(launch, model)
+
+    try:
+        results = run(agent, enumerate_fn, keep)
+    except QuotaLimitError as e:
+        return {
+            "agent": agent,
+            "mode": mode,
+            "when": stamp,
+            "agent_version": ver,
+            "model": model,
+            "skipped": True,
+            "rate_limited": True,
+            "reason": e.message,
+            "reset": e.reset_hint or None,
+            "results": [],
+            "passed": True,
+        }
+
+    return {
+        "agent": agent,
+        "mode": mode,
+        "when": stamp,
+        "agent_version": ver,
+        "claude_version": ver if agent == "claude" else None,
+        "model": model,
+        "skipped": False,
+        "rate_limited": False,
+        "results": results,
+        "passed": all(r["passed"] for r in results),
+    }
+
+
 def main():
     argv = sys.argv[1:]
     self_test = "--self-test" in argv
     use_llm = "--llm" in argv
     as_json = "--json" in argv
     keep = "--keep" in argv
-    requested_agent = os.environ.get("EVAL_AGENT", "auto")
+    requested_agent = os.environ.get("EVAL_AGENT", "all")
     if "--agent" in argv:
         i = argv.index("--agent")
-        if i + 1 >= len(argv) or argv[i + 1] not in ("auto", "claude", "gemini"):
-            print("eval-resolution: --agent needs auto, claude, or gemini", file=sys.stderr)
+        if i + 1 >= len(argv) or argv[i + 1] not in ("all", "auto", "claude", "gemini", "opencode"):
+            print("eval-resolution: --agent needs all, auto, claude, gemini, or opencode", file=sys.stderr)
             return 2
         requested_agent = argv[i + 1]
 
@@ -427,85 +524,53 @@ def main():
             return 2
         results_dir = Path(argv[i + 1])
 
-    if self_test:
-        if requested_agent == "auto":
-            if model_arg and model_arg.startswith("gemini"):
-                agent = "gemini"
-            elif agent_version("claude") is None and agent_version("gemini") is not None:
-                agent = "gemini"
-            else:
-                agent = "claude"
-        else:
-            agent = requested_agent
-        ver = agent_version(agent)
-        model = None
-        mode = f"self-test ({agent} oracle plumbing only)"
-        enumerate_fn = lambda launch: enumerate_oracle(launch, agent)
-    else:
-        agent, ver, skip_reason = select_agent(requested_agent, model_arg, use_llm=use_llm)
-        if ver is None:
-            if as_json:
-                print(json.dumps({"skipped": True, "agent": agent, "reason": skip_reason}))
-            else:
-                print(skip_reason, file=sys.stderr)
-            return 0
-        env_key = "GEMINI_MODEL" if agent == "gemini" else "CLAUDE_MODEL"
-        model = (model_arg or os.environ.get(env_key, DEFAULT_MODELS[agent])) if (agent == "claude" or use_llm) else "none (zero-API skills list)"
-        mode = f"live {agent} ({'llm' if (agent == 'claude' or use_llm) else 'zero-API skills list'})"
-        enumerate_fn = (
-            (lambda launch: enumerate_gemini(launch, model, use_llm=use_llm))
-            if agent == "gemini"
-            else (lambda launch: enumerate_claude(launch, model))
-        )
-
-    try:
-        results = run(agent, enumerate_fn, keep)
-    except QuotaLimitError as e:
-        if as_json:
-            print(json.dumps({
-                "skipped": True,
-                "rate_limited": True,
-                "agent": e.agent,
-                "model": e.model,
-                "message": e.message,
-                "reset": e.reset_hint or None,
-            }, indent=2))
-        else:
-            print(f"[RATE LIMIT] {e.agent} ({e.model}) unavailable:", file=sys.stderr)
-            print(f"  {e.message}", file=sys.stderr)
-            if e.reset_hint:
-                print(f"  Reset window: {e.reset_hint}", file=sys.stderr)
-            print("  Tip: run `just eval-skills gemini` (zero API calls) or `--self-test`.", file=sys.stderr)
-        return 0
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    report = {
-        "mode": mode,
-        "agent": agent,
-        "when": stamp,
-        "agent_version": ver,
-        "claude_version": ver if agent == "claude" else None,
-        "model": model,
-        "agents_pending": ["opencode", "goose"],
-        "results": results,
-        "passed": all(r["passed"] for r in results),
-    }
+    target_agents = resolve_target_agents(requested_agent, model_arg)
+    agent_reports = [
+        eval_single_agent(
+            agent,
+            self_test=self_test,
+            use_llm=use_llm,
+            model_arg=model_arg,
+            keep=keep,
+            stamp=stamp,
+        )
+        for agent in target_agents
+    ]
+
+    overall_passed = all(rep["passed"] for rep in agent_reports)
+    active_reports = [rep for rep in agent_reports if not rep["skipped"]]
+    skipped_reports = [rep for rep in agent_reports if rep["skipped"]]
 
     if results_dir:
         results_dir.mkdir(parents=True, exist_ok=True)
         safe = stamp.replace(":", "").replace("-", "")
-        (results_dir / f"eval-{agent}-{safe}.json").write_text(json.dumps(report, indent=2))
+        for rep in active_reports:
+            (results_dir / f"eval-{rep['agent']}-{safe}.json").write_text(json.dumps(rep, indent=2))
 
-    if as_json:
-        print(json.dumps(report, indent=2))
-    else:
-        print(f"mode:   {mode}")
-        print(f"agent:  {agent} ({ver or 'version unknown'})")
+    if len(agent_reports) == 1:
+        rep = agent_reports[0]
+        rep["agents_pending"] = ["goose"]
+        if as_json:
+            print(json.dumps(rep, indent=2))
+            return 0 if rep["passed"] else 1
+        if rep["skipped"]:
+            if rep.get("rate_limited"):
+                print(f"[RATE LIMIT] {rep['agent']} ({rep['model']}) unavailable:", file=sys.stderr)
+                print(f"  {rep['reason']}", file=sys.stderr)
+                if rep.get("reset"):
+                    print(f"  Reset window: {rep['reset']}", file=sys.stderr)
+            else:
+                print(f"eval-resolution: skipped {rep['agent']}: {rep['reason']}", file=sys.stderr)
+            return 0
+        print(f"mode:   {rep['mode']}")
+        print(f"agent:  {rep['agent']} ({rep['agent_version'] or 'version unknown'})")
         if not self_test:
-            print(f"model:  {model}")
+            print(f"model:  {rep['model']}")
         print(f"when:   {stamp}")
-        print(f"pending adapters: {', '.join(report['agents_pending'])}")
+        print(f"pending adapters: {', '.join(rep['agents_pending'])}")
         print()
-        for r in results:
+        for r in rep["results"]:
             print(f"[{'PASS' if r['passed'] else 'FAIL'}] {r['case']}")
             for c in r["checks"]:
                 tag = "ok" if c["passed"] else "MISMATCH"
@@ -513,8 +578,59 @@ def main():
                 obs = "loaded" if c["observed"] else "absent"
                 print(f"    {c['marker']:20} expected={exp:7} observed={obs:7} {tag}")
         print()
-        print("OVERALL:", "PASS" if report["passed"] else "FAIL")
-    return 0 if report["passed"] else 1
+        print("OVERALL:", "PASS" if rep["passed"] else "FAIL")
+        return 0 if rep["passed"] else 1
+
+    combined_report = {
+        "mode": "self-test (all agents)" if self_test else "live (all available agents)",
+        "when": stamp,
+        "agents_pending": ["goose"],
+        "agents": agent_reports,
+        "passed": overall_passed,
+    }
+    if as_json:
+        print(json.dumps(combined_report, indent=2))
+        return 0 if overall_passed else 1
+
+    print(f"mode:   {combined_report['mode']}")
+    print(f"when:   {stamp}")
+    print(f"pending adapters: {', '.join(combined_report['agents_pending'])}")
+    for rep in agent_reports:
+        print()
+        ver_str = rep["agent_version"] or "not installed"
+        model_str = f", model: {rep['model']}" if rep.get("model") else ""
+        print(f"=== {rep['agent']} ({ver_str}) [{rep['mode']}{model_str}] ===")
+        if rep["skipped"]:
+            kind = "RATE LIMIT" if rep.get("rate_limited") else "SKIP"
+            reset_str = f" (reset: {rep['reset']})" if rep.get("reset") else ""
+            print(f"[{kind}] {rep['reason']}{reset_str}")
+            continue
+        for r in rep["results"]:
+            print(f"[{'PASS' if r['passed'] else 'FAIL'}] {r['case']}")
+            for c in r["checks"]:
+                tag = "ok" if c["passed"] else "MISMATCH"
+                exp = "loaded" if c["expected"] else "absent"
+                obs = "loaded" if c["observed"] else "absent"
+                print(f"    {c['marker']:20} expected={exp:7} observed={obs:7} {tag}")
+
+    print()
+    print("SUMMARY:")
+    for rep in agent_reports:
+        if rep["skipped"]:
+            kind = "RATE LIMIT" if rep.get("rate_limited") else "SKIP"
+            print(f"  {rep['agent']:10} {kind} ({rep['reason']})")
+        else:
+            n_pass = sum(1 for r in rep["results"] if r["passed"])
+            n_total = len(rep["results"])
+            status = "PASS" if rep["passed"] else "FAIL"
+            print(f"  {rep['agent']:10} {status} ({n_pass}/{n_total} cases)")
+    n_active_pass = sum(1 for rep in active_reports if rep["passed"])
+    skip_note = f", {len(skipped_reports)} skipped" if skipped_reports else ""
+    print(
+        f"OVERALL: {'PASS' if overall_passed else 'FAIL'} "
+        f"({n_active_pass}/{len(active_reports)} active agents passed{skip_note})"
+    )
+    return 0 if overall_passed else 1
 
 
 if __name__ == "__main__":

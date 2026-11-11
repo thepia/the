@@ -135,34 +135,34 @@ The value of `the skills` is that its answer matches what the agents actually do
 ## Verifying resolution against the real agent
 
 The agent's real behavior is the ground truth and it drifts between versions, so
-the claims above ship with scripts that check them. The scripts support both
-Claude Code and Gemini CLI via `--agent auto|claude|gemini` and `--model MODEL`
-(auto-detecting whichever binary is on PATH); [scripts/](scripts/) is the
-extension point for the other agents.
+the claims above ship with scripts that check them. The scripts support Claude
+Code, Gemini CLI, and OpenCode via `--agent all|auto|claude|gemini|opencode`
+and `--model MODEL` (scanning for all installed agent binaries on the machine by
+default); [scripts/](scripts/) is the extension point for the other agents.
 
-- `scripts/claude-skill-dirs.py [DIR] [--agent claude|gemini]` is the **oracle**:
-  it prints the skills roots the selected agent's documented algorithm would
-  search from DIR, in precedence order, flagging parents (version-sensitive) and
-  lazy-below roots, the git repository-root boundary, and the installed agent
-  version. It is the "what should load" reference. Deterministic, stdlib only, no
-  network.
-- `scripts/probe-claude-resolution.sh [--agent auto|claude|gemini] [--model MODEL]`
+- `scripts/claude-skill-dirs.py [DIR] [--agent claude|gemini|opencode]` is the
+  **oracle**: it prints the skills roots the selected agent's documented
+  algorithm would search from DIR, in precedence order, flagging parents
+  (version-sensitive) and lazy-below roots, the git repository-root boundary,
+  and the installed agent version. It is the "what should load" reference.
+  Deterministic, stdlib only, no network.
+- `scripts/probe-claude-resolution.sh [--agent auto|claude|gemini|opencode] [--model MODEL]`
   is a **one-shot live probe**: it builds a fixture with marker skills at five
   positions (launch dir, repo root, an intermediate parent, one above the
-  repo-root boundary, one below the start dir), launches `claude --model haiku -p`
-  (override with `--model sonnet` or `CLAUDE_MODEL`) or
-  `gemini --skip-trust -m gemini-2.5-flash -p` (`GEMINI_MODEL`) from a deep
+  repo-root boundary, one below the start dir), drives `gemini skills list`,
+  `opencode debug skill`, or `claude --model haiku -p` from a deep
   subdirectory, and reports observed versus expected.
-- `scripts/eval-resolution.py [--self-test] [--agent auto|claude|gemini] [--model MODEL]`
+- `scripts/eval-resolution.py [--self-test] [--agent all|auto|claude|gemini|opencode] [--model MODEL]`
   is the **ongoing conformance eval**: it runs the marker cases
-  (parent-walk/boundary/lazy, name-defaults-to-directory, lenient-YAML) in a
-  single combined fixture against `gemini skills list` (zero API calls) or the
-  real `claude` (1 single-turn `--model haiku` call, override with `--model sonnet`)
-  and exits non-zero on any divergence, so it can gate CI or run on a schedule
-  and go red when a release changes behavior. `--self-test` validates the
-  harness itself against the oracle; OpenCode and Goose adapters are declared
-  pending, never faked. Both scripts skip cleanly when no usable agent binary is
-  on PATH.
+  (parent-walk/boundary/lazy, depth-limit, symlink, name-default, lenient-YAML)
+  in a single combined fixture against all installed assistants (`gemini skills
+  list` and `opencode debug skill` with zero API calls, and `claude` with 1
+  single-turn `--model haiku` call) and exits non-zero on any divergence, so it
+  can gate CI or run on a schedule and go red when a release changes behavior.
+  `--self-test` validates the harness itself against the oracle across all three
+  agents; the Goose adapter is declared pending, never faked. Missing or
+  rate-limited agents are reported and skipped cleanly so remaining installed
+  assistants still run.
 - `scripts/eval-trigger.py [--self-test] [--model haiku|sonnet|gemini-2.5-flash-lite|gemini-2.5-flash]`
   is the **lightweight local trigger eval**: it checks all 20 queries in
   `../agent-skills-workspace/trigger-eval.json` against this skill's frontmatter
