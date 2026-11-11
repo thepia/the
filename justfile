@@ -43,6 +43,18 @@ fmt-check:
 links:
     lychee --offline --no-progress "*.md" "docs/**/*.md"
 
+# Eval the agent-skills resolution model: harness self-test, then the live check against real agents.
+# Supports `agent="auto|claude|gemini"` and optional `model` (defaults to zero-API `gemini skills list` or 1-call `haiku`).
+# The live check skips cleanly when no usable agent binary is on PATH, so this is non-blocking, not in `gate`.
+eval-skills agent="auto" *args:
+    python3 .claude/skills/agent-skills/scripts/eval-resolution.py --self-test --agent claude
+    python3 .claude/skills/agent-skills/scripts/eval-resolution.py --self-test --agent gemini
+    python3 .claude/skills/agent-skills/scripts/eval-resolution.py --agent {{agent}} {{args}}
+
+# Lightweight local trigger eval (1 batched call across all 20 queries in trigger-eval.json; switches claude/gemini by model).
+eval-trigger model="haiku" *args:
+    python3 .claude/skills/agent-skills/scripts/eval-trigger.py --model {{model}} {{args}}
+
 # Everything CI checks on Rust: fmt-check + clippy + full tests.
 gate: fmt-check clippy test
 

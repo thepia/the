@@ -13,3 +13,5 @@ docs/scratch/
 .DS_Store
 .idea/
 *.swp
+
+.claude/**/*-workspace

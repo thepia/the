@@ -39,3 +39,18 @@ jobs:
       - uses: lycheeverse/lychee-action@v2
         with:
           args: --offline --no-progress "*.md" "docs/**/*.md"
+
+  skill-eval:
+    name: Agent-skills resolution eval (non-blocking)
+    runs-on: ubuntu-latest
+    # Non-blocking: the live check needs an authenticated `claude` the runner lacks, so it skips.
+    # The self-test still validates the harness and oracle on every PR.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Harness self-test (validates oracle + plumbing for claude and gemini)
+        run: |
+          python3 .claude/skills/agent-skills/scripts/eval-resolution.py --self-test --agent claude
+          python3 .claude/skills/agent-skills/scripts/eval-resolution.py --self-test --agent gemini
+      - name: Live eval against real agents (skips cleanly without an authenticated agent)
+        run: python3 .claude/skills/agent-skills/scripts/eval-resolution.py --agent auto

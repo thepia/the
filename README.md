@@ -1,8 +1,7 @@
-# the
+# the CLI
 
-**Thepia's command line for Linux and Nix.** It starts small: `the skills` shows every Agent Skill
-that Claude Code, OpenCode and Goose would load from where you stand, which of them loads each one,
-and why the others don't.
+**Thepia's command line for Linux and Nix.** It starts small: `the skills` shows Agent Skill situation
+for Claude Code, OpenCode and other agents where you stand.
 
 ```console
 $ the skills list
