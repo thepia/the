@@ -11,9 +11,11 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use super::links::check_links;
 use super::locate::SearchRoot;
 use super::parse::{Parsed, Problem, lint, loads, parse};
 use super::scan::{Link, link_in, scan};
+use super::smoke::check_smoke;
 use super::{Agent, Scope};
 
 /// One way a skill is reached.
@@ -140,6 +142,7 @@ pub struct ScanError {
 
 #[derive(Debug)]
 pub struct Catalog {
+    pub agents: Vec<Agent>,
     pub roots: Vec<RootInfo>,
     pub skills: Vec<Skill>,
     pub errors: Vec<ScanError>,
@@ -154,6 +157,10 @@ fn dir_name(skill_md: &Path) -> String {
 }
 
 pub fn build(plan: &[SearchRoot]) -> Catalog {
+    build_for(plan, &Agent::ALL)
+}
+
+pub fn build_for(plan: &[SearchRoot], agents: &[Agent]) -> Catalog {
     let mut roots: Vec<RootInfo> = Vec::new();
     for r in plan {
         match roots.iter_mut().find(|i| i.path == r.path) {
@@ -170,7 +177,7 @@ pub fn build(plan: &[SearchRoot]) -> Catalog {
 
     let mut errors = Vec::new();
     let mut by_canonical: HashMap<PathBuf, usize> = HashMap::new();
-    let mut found: Vec<(PathBuf, Parsed, Vec<Location>)> = Vec::new();
+    let mut found: Vec<(PathBuf, String, Parsed, Vec<Location>)> = Vec::new();
     for (ri, r) in plan.iter().enumerate() {
         let hits = match scan(r) {
             Ok(h) => h,
@@ -194,13 +201,14 @@ pub fn build(plan: &[SearchRoot]) -> Catalog {
                 rank: (ri, hi),
             };
             if let Some(&i) = by_canonical.get(&canonical) {
-                found[i].2.push(loc);
+                found[i].3.push(loc);
                 continue;
             }
             match fs::read_to_string(&canonical) {
                 Ok(text) => {
+                    let parsed = parse(&text);
                     by_canonical.insert(canonical.clone(), found.len());
-                    found.push((canonical, parse(&text), vec![loc]));
+                    found.push((canonical, text, parsed, vec![loc]));
                 }
                 Err(error) => {
                     if !errors.iter().any(|e: &ScanError| e.path == loc.path) {
@@ -216,7 +224,7 @@ pub fn build(plan: &[SearchRoot]) -> Catalog {
 
     let mut skills: Vec<Skill> = found
         .into_iter()
-        .map(|(canonical, parsed, locations)| {
+        .map(|(canonical, text, parsed, locations)| {
             let primary = locations
                 .iter()
                 .find(|l| l.link.is_none())
@@ -224,7 +232,10 @@ pub fn build(plan: &[SearchRoot]) -> Catalog {
             let (path, scope) = (primary.path.clone(), primary.scope);
             let dir = dir_name(&path);
             let name = loads(Agent::Claude, &parsed, &dir).unwrap_or(dir.clone());
-            let lint = lint(&parsed, &dir);
+            let skill_dir = canonical.parent().unwrap_or(&canonical);
+            let mut lint = lint(&parsed, &dir);
+            lint.extend(check_links(&parsed, skill_dir));
+            lint.extend(check_smoke(&text, &parsed, skill_dir));
             Skill {
                 name,
                 scope,
@@ -238,7 +249,7 @@ pub fn build(plan: &[SearchRoot]) -> Catalog {
         })
         .collect();
 
-    for agent in Agent::ALL {
+    for &agent in agents {
         // (rank, skill index, name as loaded, path as reached by this agent)
         let mut loaded: Vec<((usize, usize), usize, String, PathBuf)> = Vec::new();
         for (i, s) in skills.iter_mut().enumerate() {
@@ -303,6 +314,7 @@ pub fn build(plan: &[SearchRoot]) -> Catalog {
             .then(a.path.cmp(&b.path))
     });
     Catalog {
+        agents: agents.to_vec(),
         roots,
         skills,
         errors,

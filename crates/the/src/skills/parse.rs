@@ -17,6 +17,44 @@ use super::Agent;
 
 const NAME_MAX: usize = 64;
 const DESCRIPTION_MAX: usize = 1024;
+const COMPATIBILITY_MAX: usize = 500;
+
+/// Portable top-level keys defined by the Agent Skills (agentskills.io) specification.
+const SPEC_KEYS: &[&str] = &[
+    "name",
+    "description",
+    "license",
+    "compatibility",
+    "metadata",
+    "allowed-tools",
+];
+
+/// Known agent-specific frontmatter extension keys.
+const AGENT_EXTENSION_KEYS: &[&str] = &[
+    "argument-hint",
+    "disable-model-invocation",
+    "user-invocable",
+    "model",
+    "context",
+    "agent",
+    "hooks",
+    "version",
+    "when_to_use",
+];
+
+/// Category of a deterministic skill problem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProblemKind {
+    /// Prevents one or more coding agents from loading the skill.
+    Breaking,
+    /// Security or safety hazard (`symlink-escape`, `trojan-source`, `exposed-secret`, `unrestricted-bash`).
+    Security,
+    /// Missing or escaping local file reference (`broken-link`, `link-escapes-skill`, `broken-symlink`).
+    Asset,
+    /// Deviation from the published `agentskills.io` specification.
+    Spec,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Problem {
@@ -46,13 +84,71 @@ impl Problem {
             }
             "description-not-string" => "make `description:` a plain string",
             "description-too-long" => "shorten `description` to 1024 characters or fewer",
-            _ => unreachable!("every problem code has a fix"),
+            "compatibility-invalid" => {
+                "set `compatibility:` to a non-empty string of 500 characters or fewer"
+            }
+            "license-not-string" => {
+                "make `license:` a plain string (for example `MIT` or `Apache-2.0`)"
+            }
+            "metadata-not-map" => {
+                "make `metadata:` a flat YAML mapping of `key: value` scalar pairs"
+            }
+            "allowed-tools-invalid" => {
+                "set `allowed-tools:` to a space-delimited string or a list of tool strings"
+            }
+            "unknown-frontmatter-key" => {
+                "remove the unrecognized key or move custom fields under `metadata:`"
+            }
+            "broken-link" => {
+                "create the missing file or update the relative link target in SKILL.md"
+            }
+            "link-escapes-skill" => {
+                "keep linked files inside the skill directory so the skill stays self-contained"
+            }
+            "broken-symlink" => {
+                "remove the dangling symlink or point it to an existing file inside the skill directory"
+            }
+            "symlink-escape" => "replace the symlink with a file inside the skill directory",
+            "trojan-source" => {
+                "remove hidden bidirectional or zero-width Unicode characters from SKILL.md"
+            }
+            "exposed-secret" => {
+                "remove the credential literal from SKILL.md and reference an environment variable instead"
+            }
+            "unrestricted-bash" => {
+                "scope `allowed-tools:` to specific commands (for example `Bash(git:*)`) instead of `Bash(*)`"
+            }
+            _ => unreachable!("every problem code has a fix: {code}"),
         };
         Self {
             code,
             message: message.into(),
             fix,
         }
+    }
+
+    pub fn kind(&self) -> ProblemKind {
+        match self.code {
+            "no-frontmatter"
+            | "frontmatter-unterminated"
+            | "frontmatter-invalid"
+            | "name-missing"
+            | "name-has-slash"
+            | "description-not-string" => ProblemKind::Breaking,
+            "symlink-escape" | "trojan-source" | "exposed-secret" | "unrestricted-bash" => {
+                ProblemKind::Security
+            }
+            "broken-link" | "link-escapes-skill" | "broken-symlink" => ProblemKind::Asset,
+            _ => ProblemKind::Spec,
+        }
+    }
+
+    /// True when this problem is a high-severity security hazard (`Diagnostic::error`).
+    pub fn is_error(&self) -> bool {
+        matches!(
+            self.code,
+            "symlink-escape" | "trojan-source" | "exposed-secret"
+        )
     }
 }
 
@@ -62,6 +158,8 @@ pub struct Parsed {
     pub frontmatter_error: Option<Problem>,
     pub frontmatter: Map<String, Value>,
     pub body: String,
+    /// 1-based line number in `SKILL.md` where `body` starts.
+    pub body_start_line: usize,
 }
 
 impl Parsed {
@@ -77,6 +175,7 @@ pub fn parse(text: &str) -> Parsed {
     if !lines.next().is_some_and(|l| l.trim_end() == "---") {
         return Parsed {
             body: text.to_owned(),
+            body_start_line: 1,
             frontmatter_error: Some(Problem::new(
                 "no-frontmatter",
                 "SKILL.md does not start with a `---` YAML frontmatter block",
@@ -96,6 +195,7 @@ pub fn parse(text: &str) -> Parsed {
     }
     if !closed {
         return Parsed {
+            body_start_line: 1,
             frontmatter_error: Some(Problem::new(
                 "frontmatter-unterminated",
                 "the YAML frontmatter has no closing `---` line",
@@ -103,9 +203,17 @@ pub fn parse(text: &str) -> Parsed {
             ..Parsed::default()
         };
     }
-    let body: String = lines.collect();
+    let raw_body: String = lines.collect();
+    let trimmed_body = raw_body.trim_start_matches(['\r', '\n']);
+    let prefix_len = raw_body.len() - trimmed_body.len();
+    let stripped_newlines = raw_body[..prefix_len]
+        .bytes()
+        .filter(|&b| b == b'\n')
+        .count();
+    let yaml_lines = yaml.bytes().filter(|&b| b == b'\n').count();
     let mut out = Parsed {
-        body: body.trim_start_matches(['\r', '\n']).to_owned(),
+        body: trimmed_body.to_owned(),
+        body_start_line: 3 + yaml_lines + stripped_newlines,
         ..Parsed::default()
     };
     let invalid = |m: String| Some(Problem::new("frontmatter-invalid", m));
@@ -178,7 +286,7 @@ pub fn loads(agent: Agent, p: &Parsed, dir_name: &str) -> Result<String, Problem
             (None, Some(n)) if !n.is_empty() => n.to_owned(),
             _ => dir_name.to_owned(),
         }),
-        Agent::Goose | Agent::Opencode => {
+        Agent::Gemini | Agent::Goose | Agent::Opencode => {
             if let Some(e) = &p.frontmatter_error {
                 return Err(e.clone());
             }
@@ -198,6 +306,17 @@ pub fn loads(agent: Agent, p: &Parsed, dir_name: &str) -> Result<String, Problem
                 return Err(Problem::new(
                     "name-has-slash",
                     format!("`name: {name}` contains `/`"),
+                ));
+            }
+            if agent == Agent::Gemini
+                && p.str_field("description")
+                    .map(str::trim)
+                    .unwrap_or("")
+                    .is_empty()
+            {
+                return Err(Problem::new(
+                    "description-missing",
+                    "frontmatter has no `description`",
                 ));
             }
             if agent == Agent::Opencode
@@ -258,6 +377,72 @@ pub fn lint(p: &Parsed, dir_name: &str) -> Vec<Problem> {
             ),
         )),
         Some(_) => {}
+    }
+    if let Some(v) = p.frontmatter.get("license")
+        && !v.is_string()
+    {
+        out.push(Problem::new(
+            "license-not-string",
+            "frontmatter `license` must be a string",
+        ));
+    }
+    if let Some(v) = p.frontmatter.get("compatibility") {
+        match v.as_str() {
+            Some(s) if !s.trim().is_empty() && s.chars().count() <= COMPATIBILITY_MAX => {}
+            Some(s) if s.trim().is_empty() => out.push(Problem::new(
+                "compatibility-invalid",
+                "frontmatter `compatibility` must not be empty",
+            )),
+            Some(s) => out.push(Problem::new(
+                "compatibility-invalid",
+                format!(
+                    "`compatibility` is {} characters; the format allows {COMPATIBILITY_MAX}",
+                    s.chars().count()
+                ),
+            )),
+            None => out.push(Problem::new(
+                "compatibility-invalid",
+                "frontmatter `compatibility` must be a string",
+            )),
+        }
+    }
+    if let Some(v) = p.frontmatter.get("metadata") {
+        let valid_map = match v.as_object() {
+            Some(map) => map.values().all(|val| !val.is_object() && !val.is_array()),
+            None => false,
+        };
+        if !valid_map {
+            out.push(Problem::new(
+                "metadata-not-map",
+                "frontmatter `metadata` must be a mapping of string keys to scalar values",
+            ));
+        }
+    }
+    if let Some(v) = p.frontmatter.get("allowed-tools") {
+        let valid = match v {
+            Value::String(_) => true,
+            Value::Array(items) => items.iter().all(Value::is_string),
+            _ => false,
+        };
+        if !valid {
+            out.push(Problem::new(
+                "allowed-tools-invalid",
+                "frontmatter `allowed-tools` must be a space-delimited string or list of strings",
+            ));
+        }
+    }
+    let mut unknown: Vec<&str> = p
+        .frontmatter
+        .keys()
+        .map(String::as_str)
+        .filter(|k| !SPEC_KEYS.contains(k) && !AGENT_EXTENSION_KEYS.contains(k))
+        .collect();
+    unknown.sort_unstable();
+    for k in unknown {
+        out.push(Problem::new(
+            "unknown-frontmatter-key",
+            format!("unknown frontmatter key `{k}`"),
+        ));
     }
     out
 }
@@ -385,6 +570,215 @@ mod tests {
         assert!(
             l("no frontmatter", "a").is_empty(),
             "breaking problems are not lint"
+        );
+    }
+
+    #[test]
+    fn extended_frontmatter_lint_checks() {
+        let l = |s: &str, dir: &str| codes(&lint(&parse(s), dir));
+
+        // Known agent extension keys pass cleanly.
+        let extensions = "\
+---
+name: a
+description: Desc
+license: MIT
+compatibility: Requires git and python3
+allowed-tools: Read Grep Glob
+argument-hint: \"[file]\"
+disable-model-invocation: true
+user-invocable: true
+model: sonnet
+context: fork
+agent: general-purpose
+hooks: {}
+version: 1.0.0
+when_to_use: When testing
+metadata:
+  author: thepia
+  tier: 1
+---
+";
+        assert!(l(extensions, "a").is_empty());
+
+        // Array of strings in allowed-tools is also accepted.
+        assert!(
+            l(
+                "---\nname: a\ndescription: x\nallowed-tools:\n  - Read\n  - Write\n---\n",
+                "a"
+            )
+            .is_empty()
+        );
+
+        // Invalid compatibility: empty, non-string, or > 500 chars.
+        assert_eq!(
+            l(
+                "---\nname: a\ndescription: x\ncompatibility: \"   \"\n---\n",
+                "a"
+            ),
+            ["compatibility-invalid"]
+        );
+        assert_eq!(
+            l(
+                "---\nname: a\ndescription: x\ncompatibility: 123\n---\n",
+                "a"
+            ),
+            ["compatibility-invalid"]
+        );
+        let long_compat = format!(
+            "---\nname: a\ndescription: x\ncompatibility: {}\n---\n",
+            "c".repeat(COMPATIBILITY_MAX + 1)
+        );
+        assert_eq!(l(&long_compat, "a"), ["compatibility-invalid"]);
+
+        // Invalid license: non-string.
+        assert_eq!(
+            l("---\nname: a\ndescription: x\nlicense: 42\n---\n", "a"),
+            ["license-not-string"]
+        );
+
+        // Invalid metadata: non-mapping or nested array/object values.
+        assert_eq!(
+            l("---\nname: a\ndescription: x\nmetadata: plain\n---\n", "a"),
+            ["metadata-not-map"]
+        );
+        assert_eq!(
+            l(
+                "---\nname: a\ndescription: x\nmetadata:\n  nested:\n    k: v\n---\n",
+                "a"
+            ),
+            ["metadata-not-map"]
+        );
+        assert_eq!(
+            l(
+                "---\nname: a\ndescription: x\nmetadata:\n  list:\n    - item\n---\n",
+                "a"
+            ),
+            ["metadata-not-map"]
+        );
+
+        // Invalid allowed-tools: non-string / non-string-array.
+        assert_eq!(
+            l(
+                "---\nname: a\ndescription: x\nallowed-tools: 99\n---\n",
+                "a"
+            ),
+            ["allowed-tools-invalid"]
+        );
+        assert_eq!(
+            l(
+                "---\nname: a\ndescription: x\nallowed-tools:\n  - 99\n---\n",
+                "a"
+            ),
+            ["allowed-tools-invalid"]
+        );
+
+        // Unknown top-level frontmatter key.
+        assert_eq!(
+            l("---\nname: a\ndescription: x\ncustom-key: val\n---\n", "a"),
+            ["unknown-frontmatter-key"]
+        );
+    }
+
+    // --- Benchmark-ported cases (see cli/docs/scratch/skills-lint-test-plan.md, Appendix A) ---
+
+    #[test]
+    fn name_format_accepts_what_the_normative_validator_accepts() {
+        // skills-ref accepts 1-char, digit-leading, all-digit, and exactly-64-char names; swarmclaw
+        // wrongly rejects digit-leading (`3d-tools`). `the` must stay silent on all of these.
+        let l = |s: &str, dir: &str| codes(&lint(&parse(s), dir));
+        for name in ["a", "3d-tools", "1", "a1", &"a".repeat(NAME_MAX)] {
+            assert!(
+                l(&format!("---\nname: {name}\ndescription: x\n---\n"), name).is_empty(),
+                "name `{name}` must be accepted"
+            );
+        }
+        // And fires on the real violations.
+        for name in ["-a", "a-", "a b", "A", &"a".repeat(NAME_MAX + 1)] {
+            assert_eq!(
+                l(&format!("---\nname: {name}\ndescription: x\n---\n"), name),
+                ["name-format"],
+                "name `{name}` must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn description_length_boundary_is_chars_not_bytes() {
+        let l = |s: &str, dir: &str| codes(&lint(&parse(s), dir));
+        // Exactly 1024 is clean; 1025 fires.
+        let at = format!(
+            "---\nname: a\ndescription: {}\n---\n",
+            "x".repeat(DESCRIPTION_MAX)
+        );
+        assert!(l(&at, "a").is_empty());
+        let over = format!(
+            "---\nname: a\ndescription: {}\n---\n",
+            "x".repeat(DESCRIPTION_MAX + 1)
+        );
+        assert_eq!(l(&over, "a"), ["description-too-long"]);
+        // Counted in chars: 1024 multibyte chars stay clean (would be >1024 bytes).
+        let multibyte = format!(
+            "---\nname: a\ndescription: {}\n---\n",
+            "é".repeat(DESCRIPTION_MAX)
+        );
+        assert!(
+            l(&multibyte, "a").is_empty(),
+            "length must be counted in chars"
+        );
+    }
+
+    #[test]
+    fn whitespace_only_description_is_missing() {
+        // skill-check `description.non_empty`: whitespace-only counts as empty.
+        let l = |s: &str, dir: &str| codes(&lint(&parse(s), dir));
+        assert_eq!(
+            l("---\nname: a\ndescription: \"   \"\n---\n", "a"),
+            ["description-missing"]
+        );
+    }
+
+    #[test]
+    fn a_comment_mentioning_description_above_name_is_not_a_false_positive() {
+        // skill-check's `field_order` rule string-matches raw YAML and false-positives when a comment
+        // containing `description:` precedes `name:`. `the` parses the AST, so this must be clean.
+        let p = parse("---\n# note: description: comes later\nname: a\ndescription: real\n---\n");
+        assert_eq!(err_code(&p), None);
+        assert!(lint(&p, "a").is_empty());
+    }
+
+    #[test]
+    fn empty_frontmatter_has_no_parse_error_and_no_fields() {
+        let p = parse("---\n---\n\nbody\n");
+        assert_eq!(err_code(&p), None);
+        assert!(p.frontmatter.is_empty());
+        // Only the advisory description-missing applies (no name checks without a name).
+        assert_eq!(codes(&lint(&p, "a")), ["description-missing"]);
+    }
+
+    #[test]
+    fn top_level_scalar_and_non_string_key_are_invalid() {
+        assert_eq!(
+            err_code(&parse("---\nhello\n---\n")),
+            Some("frontmatter-invalid")
+        );
+        assert_eq!(
+            err_code(&parse("---\n? [a, b]: v\n---\n")),
+            Some("frontmatter-invalid")
+        );
+    }
+
+    #[test]
+    #[ignore = "RED gap (plan §8.4): name-mismatch compares raw strings; skills-ref NFKC-normalizes \
+                name and directory before comparing. Tied to the Unicode-name decision (§8.1)."]
+    fn name_matches_directory_under_nfkc() {
+        // `name: café` with a composed é (U+00E9) vs a directory using a decomposed é (U+0065 U+0301).
+        // Under NFKC they are equal, so no name-mismatch should be reported.
+        let p = parse("---\nname: caf\u{e9}\ndescription: x\n---\n");
+        let dir = "cafe\u{301}";
+        assert!(
+            lint(&p, dir).iter().all(|pr| pr.code != "name-mismatch"),
+            "NFKC-equal name and directory must not be a mismatch"
         );
     }
 }

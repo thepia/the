@@ -113,13 +113,17 @@ fn root(
     }
 }
 
-/// Every root to search: Claude Code's, OpenCode's, Goose's (each in its precedence order), then
-/// `--dir` roots.
-pub fn plan(env: &Env, extra: &[PathBuf]) -> Vec<SearchRoot> {
+/// Every root to search for the given `agents` (each in its precedence order), then `--dir` roots.
+pub fn plan_for(env: &Env, agents: &[Agent], extra: &[PathBuf]) -> Vec<SearchRoot> {
     let mut roots = Vec::new();
-    roots.extend(claude(env));
-    roots.extend(opencode(env));
-    roots.extend(goose(env));
+    for agent in agents {
+        match agent {
+            Agent::Claude => roots.extend(claude(env)),
+            Agent::Gemini => roots.extend(gemini(env)),
+            Agent::Opencode => roots.extend(opencode(env)),
+            Agent::Goose => roots.extend(goose(env)),
+        }
+    }
     for d in extra {
         let path = if d.is_absolute() {
             d.clone()
@@ -135,6 +139,11 @@ pub fn plan(env: &Env, extra: &[PathBuf]) -> Vec<SearchRoot> {
         ));
     }
     roots
+}
+
+/// Every root to search across all known agents, then `--dir` roots.
+pub fn plan(env: &Env, extra: &[PathBuf]) -> Vec<SearchRoot> {
+    plan_for(env, &Agent::ALL, extra)
 }
 
 fn git_root(cwd: &Path) -> Option<&Path> {
@@ -177,6 +186,24 @@ fn claude(env: &Env) -> Vec<SearchRoot> {
     };
     for d in project {
         out.push(one(Scope::Project, d.join(".claude/skills")));
+    }
+    out
+}
+
+fn gemini(env: &Env) -> Vec<SearchRoot> {
+    let a = Some(Agent::Gemini);
+    let one = |scope, path| root(a, scope, path, Depth::OneLevel, Hidden::Include);
+    let mut out = vec![
+        one(Scope::Project, env.cwd.join(".agents/skills")),
+        one(Scope::Project, env.cwd.join(".gemini/skills")),
+    ];
+    let home = env
+        .var("GEMINI_CLI_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env.home.clone());
+    if let Some(h) = home {
+        out.push(one(Scope::User, h.join(".agents/skills")));
+        out.push(one(Scope::User, h.join(".gemini/skills")));
     }
     out
 }

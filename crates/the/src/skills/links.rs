@@ -1,0 +1,398 @@
+//! Fence-aware local link and asset integrity checks for `SKILL.md`.
+//!
+//! Scans the Markdown body of a skill while tracking fenced code blocks (` ``` ` and `~~~`) and
+//! stripping inline code spans (`` `...` ``) so placeholder links inside code examples are ignored.
+//! Relative links outside code are resolved against the skill directory to detect missing local
+//! files (`broken-link`) and path traversal outside the skill directory (`link-escapes-skill`).
+
+use std::ffi::OsString;
+use std::fs;
+use std::path::{Component, Path, PathBuf};
+
+use super::parse::{Parsed, Problem};
+
+const EXTERNAL_SCHEMES: &[&str] = &[
+    "http://",
+    "https://",
+    "mailto:",
+    "mdc:",
+    "conversation://",
+    "file://",
+];
+
+/// Check all Markdown links in `p.body` against `skill_dir`.
+pub fn check_links(p: &Parsed, skill_dir: &Path) -> Vec<Problem> {
+    check_body_links(&p.body, p.body_start_line.max(1), skill_dir)
+}
+
+/// Scan `body` starting at 1-based `body_start_line` in `SKILL.md`.
+pub fn check_body_links(body: &str, body_start_line: usize, skill_dir: &Path) -> Vec<Problem> {
+    let mut out = Vec::new();
+    let canonical_skill_dir =
+        fs::canonicalize(skill_dir).unwrap_or_else(|_| skill_dir.to_path_buf());
+    let mut active_fence: Option<(char, usize)> = None;
+
+    for (idx, raw_line) in body.lines().enumerate() {
+        let line_num = body_start_line.max(1) + idx;
+        let trimmed = raw_line.trim_start();
+
+        if let Some((fence_ch, fence_len)) = active_fence {
+            if is_closing_fence(trimmed, fence_ch, fence_len) {
+                active_fence = None;
+            }
+            continue;
+        }
+        if let Some(fence) = parse_opening_fence(trimmed) {
+            active_fence = Some(fence);
+            continue;
+        }
+
+        let prose = strip_inline_code(raw_line);
+        for raw_target in extract_markdown_links(&prose) {
+            let target = normalize_target(raw_target);
+            if should_ignore_target(target) {
+                continue;
+            }
+            let clean_path = strip_fragment_and_query(target);
+            if clean_path.is_empty() {
+                continue;
+            }
+            let rel_path = Path::new(clean_path);
+            let Some(lexical_target) = resolve_within(&canonical_skill_dir, rel_path) else {
+                out.push(Problem::new(
+                    "link-escapes-skill",
+                    format!(
+                        "link `{raw_target}` at SKILL.md line {line_num} resolves outside the skill directory"
+                    ),
+                ));
+                continue;
+            };
+            if !lexical_target.exists() {
+                out.push(Problem::new(
+                    "broken-link",
+                    format!(
+                        "broken link `{raw_target}` at SKILL.md line {line_num}: `{clean_path}` does not exist"
+                    ),
+                ));
+                continue;
+            }
+            if let Ok(canon_target) = fs::canonicalize(&lexical_target)
+                && !canon_target.starts_with(&canonical_skill_dir)
+            {
+                out.push(Problem::new(
+                    "link-escapes-skill",
+                    format!(
+                        "link `{raw_target}` at SKILL.md line {line_num} resolves outside the skill directory"
+                    ),
+                ));
+            }
+        }
+    }
+
+    out
+}
+
+fn parse_opening_fence(trimmed: &str) -> Option<(char, usize)> {
+    let first = trimmed.chars().next()?;
+    if first != '`' && first != '~' {
+        return None;
+    }
+    let len = trimmed.chars().take_while(|&c| c == first).count();
+    if len < 3 {
+        return None;
+    }
+    let rest = &trimmed[len * first.len_utf8()..];
+    // In CommonMark, a backtick fence info string cannot contain backticks (that is an inline code span).
+    if first == '`' && rest.contains('`') {
+        return None;
+    }
+    Some((first, len))
+}
+
+fn is_closing_fence(trimmed: &str, fence_ch: char, min_len: usize) -> bool {
+    let count = trimmed.chars().take_while(|&c| c == fence_ch).count();
+    if count < min_len {
+        return false;
+    }
+    let rest = &trimmed[count * fence_ch.len_utf8()..];
+    rest.trim().is_empty()
+}
+
+/// Remove inline code spans (`` `...` `` or `` ``...`` ``) from a single line.
+fn strip_inline_code(line: &str) -> String {
+    let bytes = line.as_bytes();
+    let mut out = String::with_capacity(line.len());
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if bytes[i] == b'`' {
+            let start = i;
+            while i < bytes.len() && bytes[i] == b'`' {
+                i += 1;
+            }
+            let tick_len = i - start;
+            let mut cursor = i;
+            let mut closed_at = None;
+            while cursor < bytes.len() {
+                if bytes[cursor] == b'`' {
+                    let run_start = cursor;
+                    while cursor < bytes.len() && bytes[cursor] == b'`' {
+                        cursor += 1;
+                    }
+                    if cursor - run_start == tick_len {
+                        closed_at = Some(cursor);
+                        break;
+                    }
+                } else {
+                    cursor += 1;
+                }
+            }
+            if let Some(after_close) = closed_at {
+                i = after_close;
+            } else {
+                out.push_str(&line[start..i]);
+            }
+        } else {
+            let ch = line[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+
+    out
+}
+
+/// Extract the `target` portion of every `[label](target)` in `line`.
+fn extract_markdown_links(line: &str) -> Vec<&str> {
+    let mut targets = Vec::new();
+    let bytes = line.as_bytes();
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b'[' {
+            let mut j = i + 1;
+            let mut bracket_depth = 1usize;
+            while j < bytes.len() && bracket_depth > 0 {
+                if bytes[j] == b'\\' {
+                    j += 2;
+                    continue;
+                }
+                if bytes[j] == b'[' {
+                    bracket_depth += 1;
+                } else if bytes[j] == b']' {
+                    bracket_depth -= 1;
+                }
+                j += 1;
+            }
+            if bracket_depth == 0 && j < bytes.len() && bytes[j] == b'(' {
+                let target_start = j + 1;
+                let mut k = target_start;
+                let mut paren_depth = 1usize;
+                while k < bytes.len() && paren_depth > 0 {
+                    if bytes[k] == b'\\' {
+                        k += 2;
+                        continue;
+                    }
+                    if bytes[k] == b'(' {
+                        paren_depth += 1;
+                    } else if bytes[k] == b')' {
+                        paren_depth -= 1;
+                    }
+                    if paren_depth > 0 {
+                        k += 1;
+                    }
+                }
+                if paren_depth == 0 {
+                    targets.push(&line[target_start..k]);
+                    i = k + 1;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+
+    targets
+}
+
+fn normalize_target(raw: &str) -> &str {
+    let trimmed = raw.trim();
+    if let Some(inner) = trimmed.strip_prefix('<').and_then(|s| s.strip_suffix('>')) {
+        return inner.trim();
+    }
+    // Strip optional Markdown link title: `path/to/file.md "Title"` or `path/to/file.md 'Title'`.
+    if let Some((path_part, rest)) = trimmed.split_once(char::is_whitespace) {
+        let rest = rest.trim_start();
+        if rest.starts_with('"') || rest.starts_with('\'') {
+            return path_part;
+        }
+    }
+    trimmed
+}
+
+fn should_ignore_target(target: &str) -> bool {
+    if target.is_empty() || target.starts_with('#') {
+        return true;
+    }
+    let lower = target.to_ascii_lowercase();
+    EXTERNAL_SCHEMES
+        .iter()
+        .any(|scheme| lower.starts_with(scheme))
+}
+
+fn strip_fragment_and_query(target: &str) -> &str {
+    let without_fragment = target.split('#').next().unwrap_or(target);
+    without_fragment
+        .split('?')
+        .next()
+        .unwrap_or(without_fragment)
+        .trim()
+}
+
+/// Lexically resolve `rel` against `skill_dir`, returning `None` if `rel` escapes `skill_dir`.
+fn resolve_within(skill_dir: &Path, rel: &Path) -> Option<PathBuf> {
+    if rel.is_absolute() {
+        return if rel.starts_with(skill_dir) {
+            Some(rel.to_path_buf())
+        } else {
+            None
+        };
+    }
+
+    let mut stack: Vec<OsString> = Vec::new();
+    for comp in rel.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::Normal(part) => stack.push(part.to_os_string()),
+            Component::ParentDir => {
+                stack.pop()?;
+            }
+            Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+
+    let mut out = skill_dir.to_path_buf();
+    for part in stack {
+        out.push(part);
+    }
+    Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::skills::parse::parse;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct TempSkill {
+        dir: PathBuf,
+    }
+
+    impl TempSkill {
+        fn new() -> Self {
+            static N: AtomicUsize = AtomicUsize::new(0);
+            let dir = std::env::temp_dir().join(format!(
+                "the-links-ut-{}-{}",
+                std::process::id(),
+                N.fetch_add(1, Ordering::SeqCst)
+            ));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            Self {
+                dir: fs::canonicalize(dir).unwrap(),
+            }
+        }
+
+        fn write(&self, rel: &str, content: &str) {
+            let p = self.dir.join(rel);
+            if let Some(parent) = p.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+            fs::write(p, content).unwrap();
+        }
+    }
+
+    impl Drop for TempSkill {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[test]
+    fn skips_fenced_and_inline_code_and_checks_real_links() {
+        let sk = TempSkill::new();
+        sk.write("references/guide.md", "# Guide\n");
+        sk.write("scripts/run.sh", "#!/bin/sh\n");
+
+        let doc = "\
+---
+name: demo
+description: Demo skill
+---
+
+# Demo
+
+Valid links: [guide](references/guide.md#overview) and [script](scripts/run.sh?mode=fast).
+External and anchor links: [web](https://example.com/a) [mail](mailto:a@b.c) [sec](#intro) [file](file:///tmp/x) [mdc](mdc:rule) [conv](conversation://123).
+Inline code ignored: `[ghost](missing-inline.md)` and ``[ghost2](missing-inline-2.md)``.
+
+```markdown
+[fenced-backtick](missing-fenced-1.md)
+```
+
+~~~
+[fenced-tilde](missing-fenced-2.md)
+~~~
+
+Broken link on line 20: [missing](references/absent.md)
+Escaping link on line 21: [escape](../../etc/passwd)
+Sibling escape on line 22: [other](../other-skill/SKILL.md)
+";
+
+        let parsed = parse(doc);
+        let problems = check_links(&parsed, &sk.dir);
+        let codes: Vec<&str> = problems.iter().map(|p| p.code).collect();
+        assert_eq!(
+            codes,
+            ["broken-link", "link-escapes-skill", "link-escapes-skill"],
+            "{problems:?}"
+        );
+        assert!(
+            problems[0].message.contains("SKILL.md line 20")
+                && problems[0].message.contains("references/absent.md"),
+            "unexpected broken-link message: {}",
+            problems[0].message
+        );
+        assert!(
+            problems[1].message.contains("../../etc/passwd"),
+            "unexpected escape message: {}",
+            problems[1].message
+        );
+    }
+
+    #[test]
+    #[ignore = "RED gap (plan §A.2): only ``` / ~~~ fences are tracked, not 4-space-indented code \
+                blocks, so a link inside an indented block is still extracted (skill-check has the \
+                same flaw)"]
+    fn skips_links_in_four_space_indented_code() {
+        let sk = TempSkill::new();
+        let doc = "\
+---
+name: a
+description: d
+---
+
+Example:
+
+    [ghost](missing-indented.md)
+";
+        assert!(
+            check_links(&parse(doc), &sk.dir).is_empty(),
+            "links inside a 4-space indented code block must be ignored"
+        );
+    }
+}
