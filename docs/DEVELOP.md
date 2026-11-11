@@ -261,3 +261,28 @@ Run `just` (or `just --list`) to see all available tasks in [`justfile`](../just
 | `just eval-skills` | Run the agent-skills resolution oracle self-test and live agent verification |
 | `just release-dry-run` | Run `gate`, build release binary, and check `cargo package --list -p thepia` |
 | `just install-hooks` | Point `git config core.hooksPath` to `.githooks` |
+
+## Repo Health: CI, Badges & Security
+
+The README badge row must only ever show **truthful** badges: never add a badge before the thing it
+reports exists (no decorative crates.io/coverage/security badges for machinery we have not wired).
+
+### Present (honest today)
+- **CI** -> [`ci.yml`](../.github/workflows/ci.yml) status on `main` (Rust fmt/clippy/test on
+  ubuntu+macOS, Nix flake, doc links, skill-eval).
+- **License** `MIT OR Apache-2.0`, **MSRV** `rustc 1.88`, **Platform** macOS/Linux, **Nix flake**.
+- **Security policy** -> [`SECURITY.md`](SECURITY.md) (GitHub recognizes it in `docs/`).
+
+### To add, each gated on wiring its backing first
+| Badge | Needs | Notes |
+|---|---|---|
+| **Dependabot** | a `.github/dependabot.yml` (`cargo` + `github-actions`, grouped, weekly) | Standing Thepia dependabot policy; pure config, zero CI risk. **Next quick win.** |
+| **CodeQL** | a `codeql.yml` workflow | Free on a public repo; confirm GitHub CodeQL's Rust support runs green before adding the badge (do not add a red badge). github-policy Phase 8. |
+| **OpenSSF Scorecard** | `scorecard.yml` + `id-token: write` | Canonical security-health badge (`api.securityscorecards.dev`); badge appears after the first scheduled run. |
+| **OpenSSF Best Practices (CII)** | manual enrollment at bestpractices.dev | Manual, optional. |
+| **crates.io version + docs.rs** | `cargo publish` to crates.io | Only once published; today install is `cargo install --git`, so neither badge is truthful yet. |
+| **Latest release** (`github/v/release`) | a cut GitHub Release (the [release workflow](../.github/workflows/release.yml) does this) | Add once `v0.1.0` is released; before that it renders "no releases". |
+| **Codecov** | a coverage job (e.g. `cargo-llvm-cov`) uploading to Codecov | Optional; adds a CI dependency. |
+
+Order of adoption (free + highest-signal first): `dependabot.yml` -> `codeql.yml` -> Scorecard, then
+crates.io/docs.rs + the release badge once the crate is actually published and released.
