@@ -1,5 +1,6 @@
 //! `the skills list | show | dirs | lint`. Each builds a [`Report`]; rendering is format-independent.
 
+use std::io::Write;
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -32,7 +33,9 @@ pub fn run(args: SkillsArgs, format: Format, h: Human) -> Result<ExitCode, Diagn
             dirs(&search, format, h)?;
             Ok(ExitCode::SUCCESS)
         }
-        Some(SkillsCmd::Lint { name, search }) => lint(name.as_deref(), &search, format, h),
+        Some(SkillsCmd::Lint { name, search, all }) => {
+            lint(name.as_deref(), &search, all, format, h)
+        }
         None => {
             let form = if args.by_scope {
                 ListForm::ByScope
@@ -394,7 +397,7 @@ fn issue_label(code: &str) -> &'static str {
         "name-has-slash" => "skill name contains '/'",
         "description-not-string" => "non-string description",
         "symlink-escape" => "symlink escapes skill directory",
-        "trojan-source" => "hidden bidirectional or zero-width Unicode",
+        "trojan-source" => "hidden control or bidirectional character",
         "exposed-secret" => "exposed secret or credential literal",
         "skill-conflict" => "duplicate skill name conflict",
         "broken-link" => "broken relative link in SKILL.md",
@@ -802,6 +805,7 @@ fn show_report(s: &Skill) -> Report {
 fn lint(
     name: Option<&str>,
     search: &SearchArgs,
+    all: bool,
     format: Format,
     h: Human,
 ) -> Result<ExitCode, Diagnostic> {
@@ -840,15 +844,29 @@ fn lint(
     }
 
     let diags = collect_diagnostics(&skills);
-    for d in &diags {
-        d.emit(format);
-    }
 
+    // Result first: print the table on stdout so a reader sees the overview before the issues.
     let report = Report::new()
         .table("skills", lint_table(&skills))
         .json_only("diagnostics", Block::Table(diagnostics_table(&diags)))
         .json_only("searched", Block::Table(roots_table(&cat.roots)));
     output::print(&report.render(format, h))?;
+
+    // Then the diagnostics on stderr: JSON streams all of them; human shows the most urgent few
+    // (each with its file link and fix) plus a status line, directing to `--all` for the rest.
+    match format {
+        Format::Json => {
+            for d in &diags {
+                d.emit(format);
+            }
+        }
+        Format::Human if !diags.is_empty() => {
+            let summary = summarize_issues(&diags, all);
+            let text = render_issue_summary(&summary, style::Term::stderr());
+            let _ = std::io::stderr().lock().write_all(text.as_bytes());
+        }
+        Format::Human => {}
+    }
 
     let has_error_or_warning = diags
         .iter()
@@ -858,6 +876,101 @@ fn lint(
     } else {
         Ok(ExitCode::SUCCESS)
     }
+}
+
+/// Cap on urgent issues shown after the table before the summary suggests `--all`.
+const ISSUE_LIMIT: usize = 5;
+
+/// The urgent issues to show plus counts by level. Pure (no rendering), so the selection is testable
+/// and kept separate from presentation (subcommand rule: separate computation from presentation).
+struct IssueSummary<'a> {
+    /// Diagnostics to show, ordered most-urgent first and capped unless `--all`.
+    shown: Vec<&'a Diagnostic>,
+    /// How many issues are not shown.
+    hidden: usize,
+    errors: usize,
+    warnings: usize,
+    notes: usize,
+}
+
+fn level_rank(level: Level) -> u8 {
+    match level {
+        Level::Error => 0,
+        Level::Warning => 1,
+        Level::Note => 2,
+    }
+}
+
+/// Order diagnostics by urgency (errors, then warnings, then notes), cap to [`ISSUE_LIMIT`] unless
+/// `all`, and count each level.
+fn summarize_issues(diags: &[Diagnostic], all: bool) -> IssueSummary<'_> {
+    let mut order: Vec<&Diagnostic> = diags.iter().collect();
+    order.sort_by_key(|d| level_rank(d.level));
+    let limit = if all {
+        order.len()
+    } else {
+        order.len().min(ISSUE_LIMIT)
+    };
+    let count = |lvl: Level| diags.iter().filter(|d| d.level == lvl).count();
+    IssueSummary {
+        hidden: order.len() - limit,
+        errors: count(Level::Error),
+        warnings: count(Level::Warning),
+        notes: count(Level::Note),
+        shown: order.into_iter().take(limit).collect(),
+    }
+}
+
+/// Render an [`IssueSummary`] for stderr: a blank line, the shown diagnostics (each carrying its file
+/// link and fix), an optional `--all` hint, and a colored `= status:` line counting issues by type.
+fn render_issue_summary(summary: &IssueSummary, term: style::Term) -> String {
+    // One block per issue, separated by a blank line for breathing room; the status line is the last
+    // block. Each block already ends in a newline, so joining with "\n" inserts the blank separators.
+    let mut blocks: Vec<String> = summary
+        .shown
+        .iter()
+        .map(|d| d.render(Format::Human, term))
+        .collect();
+    if summary.hidden > 0 {
+        blocks.push(
+            Diagnostic::note(
+                "more-issues",
+                format!(
+                    "{} more issue{} not shown; run `the skills lint --all` to see them",
+                    summary.hidden,
+                    if summary.hidden == 1 { "" } else { "s" }
+                ),
+            )
+            .render(Format::Human, term),
+        );
+    }
+    let plural = |n: usize| if n == 1 { "" } else { "s" };
+    let mut parts = Vec::new();
+    if summary.errors > 0 {
+        parts.push(term.paint(
+            style::FAIL.bold(),
+            &format!("{} error{}", summary.errors, plural(summary.errors)),
+        ));
+    }
+    if summary.warnings > 0 {
+        parts.push(term.paint(
+            style::WARN.bold(),
+            &format!("{} warning{}", summary.warnings, plural(summary.warnings)),
+        ));
+    }
+    if summary.notes > 0 {
+        parts.push(term.paint(
+            style::INFO,
+            &format!("{} note{}", summary.notes, plural(summary.notes)),
+        ));
+    }
+    blocks.push(format!(
+        "{} {}\n",
+        term.paint(style::DIM, "= status:"),
+        parts.join(", ")
+    ));
+    // Leading blank line separates the summary from the table; blank lines separate the blocks.
+    format!("\n{}", blocks.join("\n"))
 }
 
 fn lint_table(skills: &[&Skill]) -> Table {

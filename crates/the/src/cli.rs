@@ -60,6 +60,9 @@ pub enum SkillsCmd {
         name: Option<String>,
         #[command(flatten)]
         search: SearchArgs,
+        /// Show every issue, not just the 5 most urgent.
+        #[arg(long)]
+        all: bool,
     },
 }
 
