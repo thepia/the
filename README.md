@@ -39,12 +39,6 @@ Most skill linters check a single `SKILL.md` file in isolation against basic reg
 
 ## Install
 
-With Homebrew (macOS and Linux):
-
-```sh
-brew install Thepia/tap/thepia
-```
-
 With Nix:
 
 ```sh

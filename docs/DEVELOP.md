@@ -89,33 +89,52 @@ When a user invokes `the` or `th`, [`ensure_process_name()`](../crates/the/src/l
 
 ### Packaging Conventions
 - **Nix ([`flake.nix`](../flake.nix)):** `postInstall` links `bin/the -> thepia` and `bin/th -> thepia` so the Nix store path contains a single compiled binary.
-- **Homebrew (`Thepia/tap`):** Installs `bin/thepia` and conditionally symlinks `the` and `th` if those command names are not already present:
-  ```ruby
-  bin.install "thepia"
-  bin.install_symlink "thepia" => "the" unless (HOMEBREW_PREFIX/"bin/the").exist?
-  bin.install_symlink "thepia" => "th" unless (HOMEBREW_PREFIX/"bin/th").exist?
-  ```
+- **Homebrew:** `the` does **not** publish a Homebrew formula. On macOS the `thepia` Homebrew identity belongs to the closed `thepia/cli` cask (see "Distribution: Homebrew ownership" below).
 - **Cargo:** Installs all `[[bin]]` targets (`thepia`, `the`, `th`) or a specific binary via `--bin`.
+- **cdn.thepia.com:** a stable `curl | sh` installer built from `release.json` + `SHA256SUMS`.
 
 ---
 
 ## Plan: npm Package Distribution (`thepia`)
 
-To let users install or run `the` via `npm install -g thepia`, `pnpm add -g thepia`, `bunx thepia`, or `npx thepia`, we will publish prebuilt native binaries using the `optionalDependencies` platform-package pattern (no compiler required on user machines, works with `--ignore-scripts`).
+To let users run `the` via `npx thepia`, `bunx thepia`, or install it with `npm i -g thepia` /
+`pnpm add -g thepia` / `bun add -g thepia`, we publish a **single, unscoped, public npmjs.org package**
+`thepia` that **bundles the prebuilt native binaries inside the tarball**: a macOS **universal**
+(arm64 + x86_64) binary and a Linux **x86_64** binary. A thin launcher execs the right one; an optional
+`postinstall` upgrades to direct-exec. No compiler, no runtime download.
 
-### 1. Package Structure
-Publish four platform-specific binary packages alongside the main `thepia` package:
+> Decided 2026-11-12: **bundle binaries in-package** (not a CDN/postinstall download), **unscoped public
+> npmjs.org**, published from CI with an **`NPM_TOKEN`** granular token. `thepia` is unregistered
+> (available).
 
-| Package | Rust Target | `os` | `cpu` | Contents |
-|---|---|---|---|---|
-| `@thepia/cli-darwin-arm64` | `aarch64-apple-darwin` | `["darwin"]` | `["arm64"]` | `bin/thepia` |
-| `@thepia/cli-darwin-x64` | `x86_64-apple-darwin` | `["darwin"]` | `["x64"]` | `bin/thepia` |
-| `@thepia/cli-linux-x64-gnu` | `x86_64-unknown-linux-gnu` | `["linux"]` | `["x64"]` | `bin/thepia` |
-| `@thepia/cli-linux-arm64-gnu` | `aarch64-unknown-linux-gnu` | `["linux"]` | `["arm64"]` | `bin/thepia` |
-| **`thepia`** | *(meta-package)* | — | — | `bin/the.js`, `README.md`, `optionalDependencies` |
+### Why bundled, not downloaded (corporate-gateway reach)
 
-### 2. `package.json` & Binary Entrypoints (`the`, `thepia`, `th`)
-The root `thepia` package exposes all three CLI names in its `bin` map:
+The driving requirement is installing behind corporate egress controls (Sonatype **Nexus** repository
+proxies, **Zscaler** SSL-inspection firewalls). Those environments proxy and cache the npm registry
+(often through an internal Nexus mirror) but **block or break arbitrary downloads from other hosts**.
+So the binary must arrive **as part of the npm tarball** over the registry channel corporate already
+allows: no `cdn.thepia.com` fetch, no second TLS endpoint, no postinstall network call to be gated or
+firewalled. In-package bytes get the best possible chance through Nexus + Zscaler.
+
+### Bundled target set (minimal, covers the corporate fleet)
+
+| File in package | Rust target(s) | Covers |
+|---|---|---|
+| `bin/thepia-macos` | `aarch64-apple-darwin` + `x86_64-apple-darwin`, `lipo`-merged **universal** | all Macs (Apple Silicon + Intel) |
+| `bin/thepia-linux-x64` | `x86_64-unknown-linux-gnu` | Intel/AMD Linux and WSL2 |
+
+Deliberately minimal (Mac laptops + x86_64 Linux/WSL are the corporate reality). `linux-arm64`, `musl`,
+and Windows are **not** bundled; on those the launcher prints a clear build-from-source message
+(`cargo install --git https://github.com/Thepia/the thepia`, or the Nix flake). Expand the bundle set
+later if a real audience appears; do not add a CDN fallback (it reintroduces the firewall problem).
+
+Size: two stripped+LTO binaries (the macOS one is a fat universal, ~2x). Expect a few tens of MB
+unpacked. npm and Nexus handle this; if an internal Nexus enforces a component-size cap, that is the
+one knob to check with the platform team.
+
+### 1. Single package `thepia`
+
+`package.json`:
 
 ```json
 {
@@ -123,40 +142,88 @@ The root `thepia` package exposes all three CLI names in its `bin` map:
   "version": "0.1.0",
   "description": "Thepia command line for Linux, macOS, and Nix",
   "license": "MIT OR Apache-2.0",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/Thepia/the.git"
-  },
-  "bin": {
-    "the": "bin/the.js",
-    "thepia": "bin/the.js",
-    "th": "bin/the.js"
-  },
-  "optionalDependencies": {
-    "@thepia/cli-darwin-arm64": "0.1.0",
-    "@thepia/cli-darwin-x64": "0.1.0",
-    "@thepia/cli-linux-x64-gnu": "0.1.0",
-    "@thepia/cli-linux-arm64-gnu": "0.1.0"
-  }
+  "repository": { "type": "git", "url": "https://github.com/Thepia/the.git" },
+  "bin": { "the": "bin/the.js", "thepia": "bin/the.js", "th": "bin/the.js" },
+  "files": ["bin/the.js", "bin/thepia-macos", "bin/thepia-linux-x64", "scripts/postinstall.js", "README.md", "LICENSE-MIT", "LICENSE-APACHE"],
+  "scripts": { "postinstall": "node scripts/postinstall.js" }
 }
 ```
 
-### 3. Launcher & Process Name Behaviour
-1. **Zero-overhead postinstall link (when lifecycle scripts are enabled):**
-   An optional `postinstall` script replaces or links the shim with the resolved native `thepia` binary from the matching `@thepia/cli-<os>-<cpu>` package so subsequent runs invoke the Rust binary directly without starting Node.
-2. **Fallback JS shim (`bin/the.js` for `--ignore-scripts` / `npx`):**
-   Resolves `@thepia/cli-${platform}-${arch}/bin/thepia` via `require.resolve`, spawns it with `stdio: "inherit"`, and forwards the exit code and signals. Because the child process executes the `bin/thepia` binary, the running CLI process still appears as `thepia` in OS process lists.
+The bundled binaries are staged with mode `0755`. No `checksums.json` is needed: the binaries ride
+inside the tarball, so npm's own integrity (registry hash / lockfile) already covers them. No
+`optionalDependencies`.
 
-### 4. Release Pipeline Steps ([`.github/workflows/release.yml`](../.github/workflows/release.yml))
-1. **Stage npm packages (`package` job):**
-   - Reuse the 4 native `thepia` binaries built in the `build` matrix job (`aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`).
-   - Generate `dist/npm/cli-<os>-<cpu>/package.json` with `"version": "${VERSION}"`, copy the target's `thepia` binary into `bin/thepia` (`chmod 755`), and run `npm pack --dry-run` during the dry-run gate.
-   - Generate `dist/npm/thepia/package.json` with matching `optionalDependencies` versions, `bin/the.js`, `README.md`, and `docs/LICENSE-*`.
-2. **Smoke-test (`package` job):**
-   - Pack tarballs with `npm pack` and test installing them into a temporary prefix (`npm install -g ./thepia-*.tgz`) to verify `the --version`, `thepia --version`, and `th --version`.
-3. **Publish to npm (`publish` job):**
-   - Authenticate with `NPM_TOKEN` and GitHub Actions OIDC (`--provenance`).
-   - Publish all 4 `@thepia/cli-*` platform packages first (`npm publish --provenance --access public`), then publish the root `thepia` package.
+### 2. `bin/the.js` launcher (always works, gating-proof, offline)
+
+The `bin` target. It never needs the postinstall and never touches the network:
+
+```js
+#!/usr/bin/env node
+"use strict";
+const path = require("node:path");
+const { spawnSync } = require("node:child_process");
+
+function pick() {
+  if (process.platform === "darwin") return "thepia-macos";
+  if (process.platform === "linux" && process.arch === "x64") return "thepia-linux-x64";
+  return null;
+}
+const name = pick();
+if (!name) {
+  console.error(
+    `thepia: no bundled binary for ${process.platform}-${process.arch}.\n` +
+    `  Build from source:  cargo install --git https://github.com/Thepia/the thepia\n` +
+    `  or use the Nix flake: nix profile install github:Thepia/the`
+  );
+  process.exit(1);
+}
+const bin = path.join(__dirname, name);
+// The child IS the native binary, so ps/Activity Monitor show `thepia`.
+const res = spawnSync(bin, process.argv.slice(2), { stdio: "inherit" });
+if (res.error) { console.error(String(res.error.message || res.error)); process.exit(1); }
+process.exit(res.status === null ? 1 : res.status);
+```
+
+### 3. `scripts/postinstall.js` (optional optimization only)
+
+Kept, but **not load-bearing** (pnpm v10 and bun gate dependency build scripts; `--ignore-scripts`
+disables them). When it does run, it swaps the Node wrapper for the native binary so subsequent calls
+skip Node startup: copy the selected `bin/thepia-<platform>` over `bin/the.js` (the path the `.bin`
+symlinks already point at), preserving `0755`. On an unsupported platform or any error it is a no-op
+and the launcher handles the run. Because the binaries are already present, this step does **no network
+and no selection that the launcher can't also do** - it is purely a startup-latency win. Never put
+required behavior here.
+
+### 4. Release-pipeline steps ([`.github/workflows/release.yml`](../.github/workflows/release.yml))
+
+1. **Build universal macOS binary (`package` job):** `lipo -create` the `aarch64-apple-darwin` and
+   `x86_64-apple-darwin` `thepia` binaries (both already built in the `build` matrix) into one fat
+   `thepia-macos`; **Developer ID sign** (ideally notarize) it so Gatekeeper accepts it
+   (`release-signing`). Take `x86_64-unknown-linux-gnu`'s `thepia` as `thepia-linux-x64`.
+2. **Assemble `dist/npm/thepia/`:** `package.json` (version = `${VERSION}`), `bin/the.js`,
+   `bin/thepia-macos` + `bin/thepia-linux-x64` (`chmod 755`), `scripts/postinstall.js`, `README.md`,
+   `docs/LICENSE-*`.
+3. **Dry-run smoke test (always, offline):** `npm pack`; install the tarball into a temp global prefix
+   with **`--ignore-scripts`** (to prove the launcher path works without postinstall) and assert
+   `the --version` / `thepia --version` / `th --version`; then install **with** scripts and assert the
+   direct-exec path still works. No network in either case.
+4. **Publish (`publish` job, only when `dry_run == 'false'`):** `actions/setup-node@v4` with
+   `registry-url: https://registry.npmjs.org`, `env NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}`, then
+   `npm publish dist/npm/thepia --access public`. One package, one publish.
+
+**Secret:** `gh secret set NPM_TOKEN -R thepia/the` (granular token scoped to publish `thepia`; record
+expiry in `cli/docs/build-network-credentials.md`). First publish claims the name; a later switch to
+OIDC Trusted Publishing (github-policy Phase 7) can drop the token once the name exists.
+
+### 5. Consistency notes
+
+- The npm `thepia` is the **OSS CLI binary** (same artifact as `the`/`th` and the `curl | sh`
+  installer), never the closed `.app`. npm / Nix / cargo / `curl | sh` are the open-CLI channels; the
+  macOS full product stays the signed `.app` cask (Homebrew decision A).
+- Signing the universal macOS binary serves both the npm bundle and the `curl | sh` channel (same
+  bare-binary Developer ID signing).
+- If airgapped installs need `linux-arm64`/`musl`/Windows too, add those as additional bundled files
+  (bigger tarball) rather than a download - keep everything in-package for gateway reach.
 
 ---
 
@@ -286,3 +353,22 @@ reports exists (no decorative crates.io/coverage/security badges for machinery w
 
 Order of adoption (free + highest-signal first): `dependabot.yml` -> `codeql.yml` -> Scorecard, then
 crates.io/docs.rs + the release badge once the crate is actually published and released.
+
+## Distribution: Homebrew ownership (`the` vs `cli`) — decision A
+
+The public `the` CLI and the closed `thepia/cli` product both install a binary named `thepia`, so
+they cannot both be the Homebrew `thepia`: one tap holds only one package named `thepia`, and only
+one installed formula/cask can own `bin/thepia`.
+
+**Decision (A):** on macOS the `thepia` Homebrew identity is owned by the **closed `thepia/cli`**,
+shipped as a **cask** (it must be a signed/notarized `.app` to carry the iCloud-keychain provisioning
+profile anyway; a bare brew binary can't). `the` therefore does **not** publish a Homebrew formula.
+
+`the` ships via **Nix** (`nix run`/`nix profile install`), **cargo** (`cargo install --git`), and the
+**cdn.thepia.com `curl | sh`** installer built from `release.json` + `SHA256SUMS`. The Homebrew
+formula generation and the `Thepia/homebrew-tap` push were removed from
+[`release.yml`](../.github/workflows/release.yml) accordingly, and `the` needs no `HOMEBREW_TAP_TOKEN`.
+
+If an OSS-CLI-on-brew audience ever appears, publish it under the distinct name `the` installing only
+`the`/`th` (never `thepia`), to avoid the binary clash. Ties to the two-bundle distribution and the
+shared-subcommand pattern (cli backlog).
