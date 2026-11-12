@@ -3,8 +3,9 @@
 //! Catches high-confidence hazards in `SKILL.md` and bundled files:
 //! - `symlink-escape` / `broken-symlink`: symlinks inside the skill directory that point outside
 //!   the canonical skill directory or to non-existent targets.
-//! - `trojan-source`: hidden bidirectional override/isolation or zero-width Unicode characters
-//!   (excluding a valid UTF-8 BOM at byte 0).
+//! - `trojan-source`: hidden bidirectional override/isolation or zero-width Unicode characters, and
+//!   terminal-escape/control characters (ANSI/CSI/OSC, BEL, backspace, C1), excluding a valid UTF-8
+//!   BOM at byte 0 and the whitespace controls tab/newline/carriage-return.
 //! - `exposed-secret`: live-shaped credential literals or private key blocks in frontmatter/body.
 //! - `unrestricted-bash`: unrestricted `Bash(*)`, `Bash(sh:*)`/`Bash(sh *)`, or `Bash(bash:*)`/`Bash(bash *)` grants in
 //!   `allowed-tools`.
@@ -132,6 +133,14 @@ fn is_trojan_unicode(ch: char) -> bool {
     )
 }
 
+/// Terminal-escape and control characters that can hide or rewrite rendered text in a terminal
+/// (ANSI/CSI/OSC introducers like `ESC`, `BEL`, backspace, and the 8-bit C1 range `U+0080..=U+009F`),
+/// excluding the legitimate whitespace controls tab, newline, and carriage return.
+fn is_terminal_control(ch: char) -> bool {
+    let c = ch as u32;
+    (c < 0x20 && ch != '\t' && ch != '\n' && ch != '\r') || (0x80..=0x9F).contains(&c)
+}
+
 fn check_trojan_source(raw_text: &str, out: &mut Vec<Problem>) {
     for (line_idx, line) in raw_text.split('\n').enumerate() {
         let line_num = line_idx + 1;
@@ -141,11 +150,11 @@ fn check_trojan_source(raw_text: &str, out: &mut Vec<Problem>) {
             if line_num == 1 && col == 1 && ch == '\u{FEFF}' {
                 continue;
             }
-            if is_trojan_unicode(ch) {
+            if is_trojan_unicode(ch) || is_terminal_control(ch) {
                 out.push(Problem::new(
                     "trojan-source",
                     format!(
-                        "hidden Unicode character U+{:04X} at SKILL.md line {line_num} column {col}",
+                        "hidden control or bidirectional character U+{:04X} at SKILL.md line {line_num} column {col}",
                         ch as u32
                     ),
                 ));
@@ -482,8 +491,6 @@ MIIEowIBAAKCAQEA1234567890abcdefNOTAREALKEY\n";
     }
 
     #[test]
-    #[ignore = "RED gap (plan §8.0): trojan-source does not yet catch ANSI/CSI/OSC/BEL terminal \
-                escapes that vercel-labs/skills strips in sanitize-terminal"]
     fn detects_terminal_escape_sequences() {
         let td = TempDir::new();
         let text = "---\nname: a\ndescription: d\n---\nRed \u{1b}[31minjected\u{1b}[0m and bell \u{07} here\n";

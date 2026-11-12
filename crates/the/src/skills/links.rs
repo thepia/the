@@ -31,6 +31,11 @@ pub fn check_body_links(body: &str, body_start_line: usize, skill_dir: &Path) ->
     let canonical_skill_dir =
         fs::canonicalize(skill_dir).unwrap_or_else(|_| skill_dir.to_path_buf());
     let mut active_fence: Option<(char, usize)> = None;
+    // CommonMark indented code blocks (>= 4 columns of leading whitespace) are not fenced but still
+    // code, so links inside them are not real. An indented block cannot interrupt a paragraph, so it
+    // only starts after a blank line (or continues a block already in indented code).
+    let mut prev_blank = true;
+    let mut in_indented_code = false;
 
     for (idx, raw_line) in body.lines().enumerate() {
         let line_num = body_start_line.max(1) + idx;
@@ -40,12 +45,26 @@ pub fn check_body_links(body: &str, body_start_line: usize, skill_dir: &Path) ->
             if is_closing_fence(trimmed, fence_ch, fence_len) {
                 active_fence = None;
             }
+            prev_blank = false;
             continue;
         }
         if let Some(fence) = parse_opening_fence(trimmed) {
             active_fence = Some(fence);
+            prev_blank = false;
+            in_indented_code = false;
             continue;
         }
+        if trimmed.is_empty() {
+            prev_blank = true;
+            continue;
+        }
+        if indent_columns(raw_line) >= 4 && (prev_blank || in_indented_code) {
+            in_indented_code = true;
+            prev_blank = false;
+            continue;
+        }
+        in_indented_code = false;
+        prev_blank = false;
 
         let prose = strip_inline_code(raw_line);
         for raw_target in extract_markdown_links(&prose) {
@@ -109,6 +128,20 @@ fn parse_opening_fence(trimmed: &str) -> Option<(char, usize)> {
         return None;
     }
     Some((first, len))
+}
+
+/// Leading-whitespace width in columns, counting a tab as 4 (CommonMark tab stop). Used to detect
+/// indented code blocks.
+fn indent_columns(line: &str) -> usize {
+    let mut cols = 0;
+    for c in line.chars() {
+        match c {
+            ' ' => cols += 1,
+            '\t' => cols += 4,
+            _ => break,
+        }
+    }
+    cols
 }
 
 fn is_closing_fence(trimmed: &str, fence_ch: char, min_len: usize) -> bool {
@@ -434,9 +467,6 @@ Sibling escape on line 22: [other](../other-skill/SKILL.md)
     }
 
     #[test]
-    #[ignore = "RED gap (plan §A.2): only ``` / ~~~ fences are tracked, not 4-space-indented code \
-                blocks, so a link inside an indented block is still extracted (skill-check has the \
-                same flaw)"]
     fn skips_links_in_four_space_indented_code() {
         let sk = TempSkill::new();
         let doc = "\

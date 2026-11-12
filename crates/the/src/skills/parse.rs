@@ -11,6 +11,7 @@
 
 use serde::Serialize;
 use serde_json::{Map, Value};
+use unicode_normalization::UnicodeNormalization;
 use yaml_rust2::{Yaml, YamlLoader};
 
 use super::Agent;
@@ -121,7 +122,7 @@ impl Problem {
             }
             "symlink-escape" => "replace the symlink with a file inside the skill directory",
             "trojan-source" => {
-                "remove hidden bidirectional or zero-width Unicode characters from SKILL.md"
+                "remove hidden bidirectional, zero-width, or terminal-control characters from SKILL.md"
             }
             "exposed-secret" => {
                 "remove the credential literal from SKILL.md and reference an environment variable instead"
@@ -429,7 +430,10 @@ pub fn lint(p: &Parsed, dir_name: &str) -> Vec<Problem> {
                 ),
             ));
         }
-        if n != dir_name {
+        // Compare under Unicode NFKC so a composed name and a canonically/compatibility-equivalent
+        // directory name (e.g. `café` vs `cafe` + combining acute) are not a spurious mismatch, the
+        // same normalization the reference validator (skills-ref) applies.
+        if n.nfkc().ne(dir_name.nfkc()) {
             out.push(Problem::new(
                 "name-mismatch",
                 format!(
@@ -860,8 +864,6 @@ metadata:
     }
 
     #[test]
-    #[ignore = "RED gap (plan §8.4): name-mismatch compares raw strings; skills-ref NFKC-normalizes \
-                name and directory before comparing. Tied to the Unicode-name decision (§8.1)."]
     fn name_matches_directory_under_nfkc() {
         // `name: café` with a composed é (U+00E9) vs a directory using a decomposed é (U+0065 U+0301).
         // Under NFKC they are equal, so no name-mismatch should be reported.

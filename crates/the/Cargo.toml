@@ -25,4 +25,5 @@ anstyle.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+unicode-normalization.workspace = true
 yaml-rust2.workspace = true

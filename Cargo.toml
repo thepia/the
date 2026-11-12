@@ -21,6 +21,8 @@ serde_json = "1"
 # SKILL.md frontmatter parser. Pure Rust, YAML 1.2, maintained (serde_yaml/serde_yml are deprecated).
 # Same choice as thepia/cli's spec parser.
 yaml-rust2 = "0.13"
+# Unicode NFKC normalization for name-vs-directory matching (reference-validator parity). Pure Rust.
+unicode-normalization = "0.1"
 
 [profile.release]
 lto = true
