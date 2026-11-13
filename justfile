@@ -47,12 +47,12 @@ links:
 # Supports `agent="all|auto|claude|gemini|opencode"` and optional `model` (zero API calls on Gemini/OpenCode, 1 Haiku call on Claude).
 # The live check skips cleanly when an agent binary is missing or rate-limited, so this is non-blocking, not in `gate`.
 eval-skills agent="all" *args:
-    python3 .claude/skills/agent-skills/scripts/eval-resolution.py --self-test --agent {{agent}}
-    python3 .claude/skills/agent-skills/scripts/eval-resolution.py --agent {{agent}} {{args}}
+    python3 scripts/skills/eval-resolution.py --self-test --agent {{agent}}
+    python3 scripts/skills/eval-resolution.py --agent {{agent}} {{args}}
 
 # Lightweight local trigger eval (1 batched call across all 20 queries in trigger-eval.json; switches claude/gemini by model).
 eval-trigger model="haiku" *args:
-    python3 .claude/skills/agent-skills/scripts/eval-trigger.py --model {{model}} {{args}}
+    python3 scripts/skills/eval-trigger.py --model {{model}} {{args}}
 
 # Everything CI checks on Rust: fmt-check + clippy + full tests.
 gate: fmt-check clippy test

@@ -46,8 +46,10 @@ import urllib.request
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-DEFAULT_SKILL_DIR = HERE.parent
-DEFAULT_EVAL_SET = DEFAULT_SKILL_DIR.parent / "agent-skills-workspace" / "trigger-eval.json"
+# This script lives in <repo>/scripts/skills/; the skill it evaluates is <repo>/.claude/skills/agent-skills.
+REPO_ROOT = HERE.parent.parent
+DEFAULT_SKILL_DIR = REPO_ROOT / ".claude" / "skills" / "agent-skills"
+DEFAULT_EVAL_SET = REPO_ROOT / ".claude" / "skills" / "agent-skills-workspace" / "trigger-eval.json"
 
 DEFAULT_MODELS = {
     "claude": "haiku",

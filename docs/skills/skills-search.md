@@ -3,7 +3,7 @@
 `the skills` imitates the skill search and load rules of four coding agents, so it can say, for any
 skill on the machine, which agents load it and why the others don't. This page is the record of
 those rules: where each came from, what we assumed where the source is silent, and what is not
-imitated yet. The code lives in [`crates/the/src/skills/`](../crates/the/src/skills/).
+imitated yet. The code lives in [`crates/the/src/skills/`](../../crates/the/src/skills/).
 
 ## Sources
 
@@ -12,7 +12,7 @@ imitated yet. The code lives in [`crates/the/src/skills/`](../crates/the/src/ski
 | Claude Code | Official docs: [skills](https://code.claude.com/docs/en/skills), [managed settings](https://code.claude.com/docs/en/managed-settings), [env vars](https://code.claude.com/docs/en/env-vars) | fetched 2026-11-10 |
 | OpenCode | Source: `packages/opencode/src/skill/index.ts`, `config/paths.ts`, `effect/runtime-flags.ts` in `anomalyco/opencode` | v1.19.5 (`810c0eba`) |
 | Goose | Source: `crates/goose/src/skills/mod.rs`, `config/paths.rs` | `thepia/goose` fork at `846cbeaf` |
-| Gemini CLI | The repo's resolution oracle, [`.claude/skills/agent-skills/scripts/claude-skill-dirs.py`](../.claude/skills/agent-skills/scripts/claude-skill-dirs.py), whose live eval (`eval-resolution.py --agent gemini`) checks it against `gemini skills list` | not verified on the machine this page was written on (Gemini CLI not installed) |
+| Gemini CLI | The repo's resolution oracle, [`scripts/skills/claude-skill-dirs.py`](../../scripts/skills/claude-skill-dirs.py), whose live eval (`eval-resolution.py --agent gemini`) checks it against `gemini skills list` | not verified on the machine this page was written on (Gemini CLI not installed) |
 
 ## Where each agent looks
 

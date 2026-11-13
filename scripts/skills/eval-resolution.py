@@ -3,7 +3,7 @@
 Code, Gemini CLI, and OpenCode skill resolution against the real installed
 agents.
 
-The skill and docs/skills-search.md claim how coding agents resolve project
+The agent-skills skill and docs/skills/skills-search.md claim how coding agents resolve project
 skills. Agents change between versions, so a claim is only trustworthy if it is
 re-checked against reality. This runner encodes each claim as a CASE with a
 fixture and an expected set of skills visible at startup, drives every

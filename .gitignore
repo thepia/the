@@ -6,7 +6,7 @@
 /result-*
 
 # Local scratch: plans, design sketches and cross-agent exchanges. Never committed; the durable
-# record lives in docs/ (see docs/skills-search.md).
+# record lives in docs/ (see docs/skills/).
 docs/scratch/
 
 # OS / editor

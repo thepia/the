@@ -188,7 +188,7 @@ Uses `gray-matter` and `zod` (`skillFrontmatterSchema`) with an agent `FLAVORS` 
 ## Summary: Delegate vs. Native in `the skills`
 
 `the` prioritizes minimal, auditable Rust dependencies (`clap`, `anstyle`, `serde`, `yaml-rust2`) and
-fast offline execution. See [docs/SKILLS-LINT.md](../../../docs/SKILLS-LINT.md) for the complete
+fast offline execution. See [docs/skills/SKILLS-LINT.md](../../../docs/skills/SKILLS-LINT.md) for the complete
 design and roadmap.
 
 ### 1. Out of Scope (Reserved, Not Delegated)

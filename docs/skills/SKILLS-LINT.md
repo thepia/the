@@ -28,7 +28,7 @@ Quality checking in `thepia` separates **what breaks an agent** from **what degr
      check.
 3. **Stream Separation (`stdout` vs. `stderr`):**
    - `stdout` carries the structured `Report` (human table/summary or `--format json` document).
-   - `stderr` carries `rustc`-styled [`Diagnostic`](../crates/the/src/diag.rs) entries (`error`,
+   - `stderr` carries `rustc`-styled [`Diagnostic`](../../crates/the/src/diag.rs) entries (`error`,
      `warning`, `note`), each with a stable kebab-case `code`, offending file `context`, `cause`,
      and actionable `help` fix instructions.
 
@@ -36,7 +36,7 @@ Quality checking in `thepia` separates **what breaks an agent** from **what degr
 
 ## 2. Native Checks in `the skills lint`: USP and Implementation
 
-Every native check in `the` runs in-process in Rust on top of [`yaml-rust2`](../crates/the/src/skills/parse.rs)
+Every native check in `the` runs in-process in Rust on top of [`yaml-rust2`](../../crates/the/src/skills/parse.rs)
 and `std::fs`, completing in milliseconds with zero network calls and zero external runtime
 dependencies.
 
@@ -52,7 +52,7 @@ dependencies.
   random on every launch. `the` is the only tool that models each agent's exact discovery walk and
   loader rules (`loaded`, `shadowed`, `conflict`, `skipped`) so you know before launching an agent
   whether your skill will actually load.
-- **How It Works ([`parse.rs`](../crates/the/src/skills/parse.rs), [`resolve.rs`](../crates/the/src/skills/resolve.rs)):**
+- **How It Works ([`parse.rs`](../../crates/the/src/skills/parse.rs), [`resolve.rs`](../../crates/the/src/skills/resolve.rs)):**
   - Classifies frontmatter failures with exact 1-based `SKILL.md` line and column numbers
     (`no-frontmatter`, `frontmatter-unterminated`, `frontmatter-invalid`).
   - Evaluates per-agent loader rules in `loads()`:
@@ -88,7 +88,7 @@ dependencies.
   rejecting valid digit-leading skill names). `the` validates the full specification accurately on
   the parsed YAML AST.
 - **How It Works:**
-  - **Implemented in [`parse.rs`](../crates/the/src/skills/parse.rs):**
+  - **Implemented in [`parse.rs`](../../crates/the/src/skills/parse.rs):**
     - `name-format`: `name` must be 1 to 64 characters of ASCII lowercase letters, digits, and
       single hyphens (`^[a-z0-9]+(-[a-z0-9]+)*$`), not starting or ending with `-` and without `--`.
     - `name-mismatch`: `name` must match the parent directory name.
@@ -146,7 +146,7 @@ dependencies.
   - Scans `SKILL.md` (and any `references/*.md` files inside the skill directory) with a fence state
     machine that tracks opening and closing ```` ``` ```` and `~~~` blocks so code examples are skipped.
   - Extracts Markdown links `[label](target)` and `@[label](target)` includes outside code fences.
-  - **Implemented in [`links.rs`](../crates/the/src/skills/links.rs) (`local_path`), applied before
+  - **Implemented in [`links.rs`](../../crates/the/src/skills/links.rs) (`local_path`), applied before
     resolving:**
     - `${CLAUDE_SKILL_DIR}` expands to the skill directory, so `${CLAUDE_SKILL_DIR}/scripts/x.py` is
       checked like `scripts/x.py`, including the escape check.
@@ -213,7 +213,7 @@ dependencies.
   or `allowed-tools: Bash(*)` in a skill copied from a scratchpad. Running a full external security
   scanner on every `the skills list` or `the skills lint` invocation would be too slow, so `the`
   includes a zero-latency, in-process smoke test that catches high-risk accidents immediately.
-- **How It Works ([`smoke.rs`](../crates/the/src/skills/smoke.rs)):**
+- **How It Works ([`smoke.rs`](../../crates/the/src/skills/smoke.rs)):**
   - Runs in-memory over `SKILL.md` (and bundled text files when `the skills lint` runs) with zero
     subprocesses:
     1. `exposed-secret` (implemented, **error**): high-confidence hardcoded credential literals

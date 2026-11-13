@@ -304,7 +304,7 @@ crates/the/
 ### Reserved `the skills` Subcommands (`add`, `update`, `remove`) and Scope Boundary
 - **`the skills add`**, **`the skills update`**, and **`the skills remove`** are **reserved subcommand names**.
 - We do **not** plan to implement them by delegating to `skills.sh` (`npx skills`). `skills.sh` is a third-party GitHub/registry installer and lockfile manager (`skills-lock.json`), whereas `the` is built for **refining, verifying, and organizing self-authored AI abilities** across `~/.agents` and project workspaces.
-- For how `the skills lint` and `the skills audit` check quality, security, and token budgets (both natively and via targeted delegation to `LichAmnesia/skill-lint` and `@haasstefan/skills-lint`), see [`docs/SKILLS-LINT.md`](SKILLS-LINT.md).
+- For how `the skills lint` and `the skills audit` check quality, security, and token budgets (both natively and via targeted delegation to `LichAmnesia/skill-lint` and `@haasstefan/skills-lint`), see [`docs/skills/SKILLS-LINT.md`](skills/SKILLS-LINT.md).
 
 ---
 

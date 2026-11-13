@@ -49,6 +49,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Harness self-test (validates oracle + plumbing for claude, gemini, and opencode)
-        run: python3 .claude/skills/agent-skills/scripts/eval-resolution.py --self-test --agent all
+        run: python3 scripts/skills/eval-resolution.py --self-test --agent all
       - name: Live eval against real agents (skips cleanly without an authenticated agent)
-        run: python3 .claude/skills/agent-skills/scripts/eval-resolution.py --agent all
+        run: python3 scripts/skills/eval-resolution.py --agent all

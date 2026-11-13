@@ -22,7 +22,7 @@ OpenCode and Goose each search for skills, decide which to load, and resolve sam
 which agents load it and why the others do not.
 
 This skill is the orientation. The authoritative, versioned, source-cited record of the imitation
-rules is [docs/skills-search.md](../../../docs/skills-search.md), and the code lives under
+rules is [docs/skills/skills-search.md](../../../docs/skills/skills-search.md), and the code lives under
 [crates/the/src/skills/](../../../crates/the/src). When a rule here and the doc disagree, the doc
 wins and this file is stale: fix it.
 
@@ -58,7 +58,7 @@ Keep these precise; they are the output contract, not loose synonyms.
 ## Resolved, found, described: the shape, not the table
 
 Do not memorize or paraphrase the per-agent location tables; read them from
-[docs/skills-search.md](../../../docs/skills-search.md), which carries the source and version each
+[docs/skills/skills-search.md](../../../docs/skills/skills-search.md), which carries the source and version each
 rule came from. The shape to hold in your head:
 
 - **Where.** All three read a `user` home skills dir (`~/.claude/skills`, also `~/.agents/skills` for
@@ -91,7 +91,7 @@ Claude reads or edits a file in that subtree. Rules (CLAUDE.md memory) have walk
 longer, so older builds load rules from parents but project skills from the start directory only;
 that is why a running Claude can show no parent pickup while the docs describe it. Do not assume
 rules and skills walk alike on a given build. Settle it on the installed version with the probe in
-[scripts/](scripts/) rather than trusting the prose.
+[scripts/skills/](../../../scripts/skills/) rather than trusting the prose.
 
 ## Managed across agents: collisions and sharing
 
@@ -120,7 +120,7 @@ one JSON object per diagnostic on stderr.
 The value of `the skills` is that its answer matches what the agents actually do. Protect that:
 
 - **Cite the source and version.** Every imitation rule traces to a doc page or a pinned source
-  commit in [docs/skills-search.md](../../../docs/skills-search.md). A new or changed rule updates
+  commit in [docs/skills/skills-search.md](../../../docs/skills/skills-search.md). A new or changed rule updates
   that table in the same change; code and doc move together or the tool lies.
 - **Observe, do not guess, where a source is silent.** Several rules are undocumented (Claude Code
   outside a repo, intra-tier duplicates, lenient-YAML parsing). The doc has an explicit "assumptions"
@@ -138,21 +138,21 @@ The agent's real behavior is the ground truth and it drifts between versions, so
 the claims above ship with scripts that check them. The scripts support Claude
 Code, Gemini CLI, and OpenCode via `--agent all|auto|claude|gemini|opencode`
 and `--model MODEL` (scanning for all installed agent binaries on the machine by
-default); [scripts/](scripts/) is the extension point for the other agents.
+default); [scripts/skills/](../../../scripts/skills/) is the extension point for the other agents.
 
-- `scripts/claude-skill-dirs.py [DIR] [--agent claude|gemini|opencode]` is the
+- `scripts/skills/claude-skill-dirs.py [DIR] [--agent claude|gemini|opencode]` is the
   **oracle**: it prints the skills roots the selected agent's documented
   algorithm would search from DIR, in precedence order, flagging parents
   (version-sensitive) and lazy-below roots, the git repository-root boundary,
   and the installed agent version. It is the "what should load" reference.
   Deterministic, stdlib only, no network.
-- `scripts/probe-claude-resolution.sh [--agent auto|claude|gemini|opencode] [--model MODEL]`
+- `scripts/skills/probe-claude-resolution.sh [--agent auto|claude|gemini|opencode] [--model MODEL]`
   is a **one-shot live probe**: it builds a fixture with marker skills at five
   positions (launch dir, repo root, an intermediate parent, one above the
   repo-root boundary, one below the start dir), drives `gemini skills list`,
   `opencode debug skill`, or `claude --model haiku -p` from a deep
   subdirectory, and reports observed versus expected.
-- `scripts/eval-resolution.py [--self-test] [--agent all|auto|claude|gemini|opencode] [--model MODEL]`
+- `scripts/skills/eval-resolution.py [--self-test] [--agent all|auto|claude|gemini|opencode] [--model MODEL]`
   is the **ongoing conformance eval**: it runs the marker cases
   (parent-walk/boundary/lazy, depth-limit, symlink, name-default, lenient-YAML)
   in a single combined fixture against all installed assistants (`gemini skills
@@ -163,7 +163,7 @@ default); [scripts/](scripts/) is the extension point for the other agents.
   agents; the Goose adapter is declared pending, never faked. Missing or
   rate-limited agents are reported and skipped cleanly so remaining installed
   assistants still run.
-- `scripts/eval-trigger.py [--self-test] [--model haiku|sonnet|gemini-2.5-flash-lite|gemini-2.5-flash]`
+- `scripts/skills/eval-trigger.py [--self-test] [--model haiku|sonnet|gemini-2.5-flash-lite|gemini-2.5-flash]`
   is the **lightweight local trigger eval**: it checks all 20 queries in
   `../agent-skills-workspace/trigger-eval.json` against this skill's frontmatter
   description in a single batched prompt (~1k tokens total instead of spawning
@@ -172,12 +172,12 @@ default); [scripts/](scripts/) is the extension point for the other agents.
   optional `--apply`) to propose description improvements when a query fails.
 
 A red eval is the signal to re-derive the rule from the agent and update this
-skill and [docs/skills-search.md](../../../docs/skills-search.md) together, rather
+skill and [docs/skills/skills-search.md](../../../docs/skills/skills-search.md) together, rather
 than trusting the prose.
 
 ## Where to go next
 
-- [docs/skills-search.md](../../../docs/skills-search.md): the authoritative per-agent rules, with
+- [docs/skills/skills-search.md](../../../docs/skills/skills-search.md): the authoritative per-agent rules, with
   sources, versions, assumptions, and what is not imitated yet. Read this before editing resolution
   code.
 - Upstream sources of truth: Claude Code docs (`code.claude.com/docs/en/skills`, managed-settings,
