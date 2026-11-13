@@ -13,7 +13,7 @@ The release package is **`thepia`**, which installs the **`the`** CLI command (a
 
 ## Subcommands
 
-- **`the skills`** - Inspect, validate, and refine agent skills across Claude Code, Codex, Gemini CLI, OpenCode, and Goose ([search & loading rules](docs/skills-search.md), [linting & quality checks](docs/SKILLS-LINT.md)).
+- **`the skills`** - Inspect, validate, and refine agent skills across Claude Code, Gemini CLI, OpenCode, and Goose ([search & loading rules](docs/skills-search.md), [linting & quality checks](docs/SKILLS-LINT.md)).
 
 Run `the --help` or `the <subcommand> --help` for usage details.
 
@@ -23,19 +23,19 @@ Most skill linters check a single `SKILL.md` file in isolation against basic reg
 
 1. **Cross-Agent Loadability & Precedence Simulation**
    - *See what every agent actually loads, not just whether the markdown parses.*
-   - Simulates the real parent-directory walks, symlink hops, and loader strictness of Claude Code, Codex, Gemini CLI, OpenCode, and Goose simultaneously. Catches silent shadowing across scopes, OpenCode concurrent load conflicts (`error[conflict]`), and strict-vs-lenient loader splits (`claude: fallback (dir name)` vs. `codex: rejected`).
+   - Simulates the real parent-directory walks, symlink hops, and loader strictness of Claude Code, Gemini CLI, OpenCode, and Goose simultaneously. Catches silent shadowing across scopes, OpenCode concurrent load conflicts (`warning[skill-conflict]`), and strict-vs-lenient loader splits (`claude: loaded` vs. `goose: skipped`).
 2. **Agent Skills Spec & Extended Frontmatter Validation**
    - *One zero-dependency validator for both the strict `agentskills.io` spec and real-world agent extensions.*
    - Validates strict `agentskills.io` constraints (`name` format and directory match, `compatibility <= 500` chars, `metadata` string map) alongside agent-specific extensions (`argument-hint`, `user-invocable`, `context`, `agent`, `hooks`) in a single pass.
 3. **Fence-Aware Local Link & Asset Integrity**
    - *Catch hallucinated asset paths before an agent hits `ENOENT` mid-task.*
    - Progressive disclosure relies on links to `./references/...` and `./scripts/...`. `the skills lint` strips fenced code blocks and inline code spans before verifying that every local Markdown link resolves on disk and stays within the skill root directory.
-4. **Trigger Specificity & Pairwise Routing Overlap**
+4. **Trigger Specificity & Pairwise Routing Overlap** (planned)
    - *Prevent routing collisions and dead skills before they confuse the model.*
    - Agents decide whether to activate a skill almost entirely from its `description`. Checks for explicit trigger conditions (`Use when...`), flags generic openers (`This skill...`), verifies distinctive vocabulary, and computes pairwise overlap across all active skills in your workspace.
-5. **Zero-Latency Security Smoke Test (`skill-smoke`)**
+5. **Zero-Latency Security Smoke Test**
    - *Instant guardrails against accidental secrets, invisible Trojans, and symlink escapes on every edit.*
-   - Runs in `< 1 ms` during normal linting to catch symlink escapes (`error[symlink-escape]`), bidirectional/zero-width Trojan source characters (`error[trojan-source]`), exposed API keys (`error[exposed-secret]`), and unverified `curl | sh` pipes (`warning[remote-exec-pipe]`), while `the skills audit` delegates deep static taint analysis.
+   - Runs in-process during normal linting to catch symlink escapes (`error[symlink-escape]`), bidirectional/zero-width Trojan source characters (`error[trojan-source]`), exposed API keys (`error[exposed-secret]`), and unrestricted `Bash` grants (`warning[unrestricted-bash]`). Planned: unverified `curl | sh` pipes (`warning[remote-exec-pipe]`), and `the skills audit` delegating deep static taint analysis.
 
 ## Install
 

@@ -49,11 +49,13 @@ pub fn check_body_links(body: &str, body_start_line: usize, skill_dir: &Path) ->
 
         let prose = strip_inline_code(raw_line);
         for raw_target in extract_markdown_links(&prose) {
-            let target = normalize_target(raw_target);
+            let (angle, target) = normalize_target(raw_target);
             if should_ignore_target(target) {
                 continue;
             }
-            let clean_path = strip_fragment_and_query(target);
+            let Some(clean_path) = local_path(strip_fragment_and_query(target), angle) else {
+                continue;
+            };
             if clean_path.is_empty() {
                 continue;
             }
@@ -219,19 +221,49 @@ fn extract_markdown_links(line: &str) -> Vec<&str> {
     targets
 }
 
-fn normalize_target(raw: &str) -> &str {
+/// The link destination, and whether it was written in CommonMark's `<...>` form.
+fn normalize_target(raw: &str) -> (bool, &str) {
     let trimmed = raw.trim();
     if let Some(inner) = trimmed.strip_prefix('<').and_then(|s| s.strip_suffix('>')) {
-        return inner.trim();
+        return (true, inner.trim());
     }
     // Strip optional Markdown link title: `path/to/file.md "Title"` or `path/to/file.md 'Title'`.
     if let Some((path_part, rest)) = trimmed.split_once(char::is_whitespace) {
         let rest = rest.trim_start();
         if rest.starts_with('"') || rest.starts_with('\'') {
-            return path_part;
+            return (false, path_part);
         }
     }
-    trimmed
+    (false, trimmed)
+}
+
+const SKILL_DIR_VAR: &str = "${CLAUDE_SKILL_DIR}";
+const PROJECT_DIR_VAR: &str = "${CLAUDE_PROJECT_DIR}";
+
+/// The path to check inside the skill, or `None` when the target is not a checkable local path.
+///
+/// - `${CLAUDE_SKILL_DIR}` (Claude Code's variable for the skill directory) expands to the skill
+///   directory, so `${CLAUDE_SKILL_DIR}/scripts/x.sh` is checked like `scripts/x.sh`.
+/// - `${CLAUDE_PROJECT_DIR}` targets are skipped: the project is whichever one the session runs in,
+///   so they point outside the skill on purpose and cannot be resolved here.
+/// - Anything still holding `{`, `}` or `$` is a template or an unknown variable (`{{name}}.md`).
+/// - A `<...>` destination is CommonMark's form for a path with spaces (`<my file.md>`), so it is
+///   checked; only a bare word with no `/` or `.` (`<template>`, `<name>`) is a placeholder.
+fn local_path(path: &str, angle: bool) -> Option<&str> {
+    if path.starts_with(PROJECT_DIR_VAR) {
+        return None;
+    }
+    let path = match path.strip_prefix(SKILL_DIR_VAR) {
+        Some(rest) => rest.trim_start_matches('/'),
+        None => path,
+    };
+    if path.contains(['{', '}', '$']) {
+        return None;
+    }
+    if angle && !path.contains(['/', '.']) {
+        return None;
+    }
+    Some(path)
 }
 
 fn should_ignore_target(target: &str) -> bool {
@@ -320,6 +352,33 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.dir);
         }
+    }
+
+    #[test]
+    fn variables_and_placeholders_are_resolved_or_skipped_not_reported() {
+        let sk = TempSkill::new();
+        sk.write("scripts/x.sh", "#!/bin/sh\n");
+        sk.write("my file.md", "spaces\n");
+        let body = "\
+[ok](${CLAUDE_SKILL_DIR}/scripts/x.sh) [proj](${CLAUDE_PROJECT_DIR}/docs/a.md)
+[t](<template>) [n]({{name}}.md) [e]($HOME/x.md) [spaced](<my file.md>)
+[gone](${CLAUDE_SKILL_DIR}/scripts/missing.sh) [gone2](<missing file.md>)
+[out](${CLAUDE_SKILL_DIR}/../escape.md)
+";
+        let codes: Vec<(&str, String)> = check_body_links(body, 1, &sk.dir)
+            .into_iter()
+            .map(|p| (p.code, p.message))
+            .collect();
+        assert_eq!(codes.len(), 3, "{codes:?}");
+        assert!(
+            codes[0].0 == "broken-link" && codes[0].1.contains("missing.sh"),
+            "{codes:?}"
+        );
+        assert!(
+            codes[1].0 == "broken-link" && codes[1].1.contains("missing file.md"),
+            "{codes:?}"
+        );
+        assert_eq!(codes[2].0, "link-escapes-skill", "{codes:?}");
     }
 
     #[test]

@@ -756,3 +756,67 @@ claude, opencode, goose
     assert!(colored.status.success());
     assert!(stdout(&colored).contains('\u{1b}'));
 }
+
+#[test]
+fn claude_code_identifies_skills_by_directory_and_flags_shared_command_names() {
+    // Verified against Claude Code 2.1.258: both directories load, listed as `alpha-dir` and
+    // `beta-dir`; `/shared-name` invokes only one of them.
+    let sb = Sandbox::new();
+    sb.skill(
+        &sb.home().join(".claude/skills/alpha-dir"),
+        &md("shared-name", "Alpha."),
+    );
+    sb.skill(
+        &sb.home().join(".claude/skills/beta-dir"),
+        &md("shared-name", "Beta."),
+    );
+
+    let o = sb.run(&["skills", "list", "--format", "json"]);
+    let v = json(&o);
+    let skills = v["skills"].as_array().unwrap();
+    assert_eq!(skills.len(), 2);
+    for s in skills {
+        assert_eq!(s["status"]["claude"]["status"], "loaded", "{s}");
+    }
+    let claude_names: Vec<&str> = skills
+        .iter()
+        .map(|s| s["status"]["claude"]["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(claude_names.len(), 2);
+    assert!(claude_names.contains(&"alpha-dir") && claude_names.contains(&"beta-dir"));
+    // Goose and OpenCode do key by frontmatter `name`.
+    let goose: Vec<&str> = skills
+        .iter()
+        .map(|s| s["status"]["goose"]["status"].as_str().unwrap())
+        .collect();
+    assert!(
+        goose.contains(&"loaded") && goose.contains(&"shadowed"),
+        "{goose:?}"
+    );
+
+    let collisions: Vec<Value> = diags(&o)
+        .into_iter()
+        .filter(|d| d["code"] == "claude-alias-collision")
+        .collect();
+    assert_eq!(collisions.len(), 1, "one warning per shared name");
+    assert_eq!(collisions[0]["level"], "warning");
+    assert_eq!(collisions[0]["context"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn documented_claude_code_frontmatter_keys_are_not_unknown() {
+    let sb = Sandbox::new();
+    sb.skill(
+        &sb.home().join(".claude/skills/modern"),
+        "---\nname: modern\ndescription: Uses 2026 Claude Code fields.\neffort: xhigh\narguments: issue\ndisallowed-tools: Write\nbackground: false\npaths: \"src/**\"\nshell: bash\nwhen_to_use: When testing.\n---\nBody.\n",
+    );
+    let o = sb.run(&["skills", "lint", "modern", "--format", "json"]);
+    let unknown: Vec<Value> = diags(&o)
+        .into_iter()
+        .filter(|d| {
+            d.to_string().contains("unknown-frontmatter-key")
+                || d.to_string().contains("unknown frontmatter key")
+        })
+        .collect();
+    assert!(unknown.is_empty(), "{unknown:?}");
+}

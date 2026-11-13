@@ -21,7 +21,7 @@ Quality checking in `thepia` separates **what breaks an agent** from **what degr
 1. **Agent-Breaking Warnings (`skill-skipped`, `skill-conflict`):**
    - Emitted when a real coding agent (`claude`, `gemini`, `opencode`, `goose`) will reject the
      skill outright or load it nondeterministically.
-2. **Quality and Conformance Diagnostics (`skill-lint`, `skill-trigger`, `skill-link`, `skill-smoke`, `skill-tokens`):**
+2. **Quality and Conformance Diagnostics (`skill-lint`; asset codes such as `broken-link`; security codes such as `exposed-secret`; projected `skill-trigger` and `skill-tokens`):**
    - Emitted when a skill loads in at least one agent but violates the published
      [Agent Skills (`agentskills.io`)](https://agentskills.io) format, has weak or colliding trigger
      descriptions, points to missing local files, exceeds context budgets, or trips a security smoke
@@ -63,6 +63,19 @@ dependencies.
   - Resolves canonical paths across symlinks so a shared skill is reported once with all reached
     locations, while distinct files with the same `name` are flagged as `shadowed` (`claude`,
     `goose`) or `skill-conflict` (`opencode`).
+- **Claude Code identity is the directory name (verified 2026-11-13, see
+  [skills-search.md](skills-search.md#verified-behavior); implemented):**
+  - Claude Code identifies a personal or project skill by its **directory name**. The frontmatter
+    `name` sets the `/` command unless another skill already claims it. `loads()` returns the
+    directory name for Claude Code, so two skills that share only a frontmatter `name` are both
+    `loaded`, as in the real agent, instead of one being reported `shadowed`.
+  - **`claude-alias-collision` (warning, implemented):** when several skills loaded by Claude Code
+    claim the same frontmatter `name`, `/<name>` invokes only one of them. One warning per shared
+    name lists every file and tells the author to give each a unique `name` (or drop it).
+  - `name-mismatch` now says that Claude Code lists the skill under its directory name and that
+    `/<name>` works only if no other skill claims it.
+  - In a plugin, the frontmatter `name` overrides the directory name (per the claude-skill-lint spec;
+    not verified). This only matters once plugins are imitated (see Not yet covered).
 
 ### Check 2: Agent Skills (`agentskills.io`) Spec and Extended Frontmatter Lint (Implemented + Projected)
 
@@ -80,20 +93,46 @@ dependencies.
       single hyphens (`^[a-z0-9]+(-[a-z0-9]+)*$`), not starting or ending with `-` and without `--`.
     - `name-mismatch`: `name` must match the parent directory name.
     - `description-missing` and `description-too-long`: `description` must be 1 to 1024 characters.
-  - **Projected Additions to `parse::lint()`:**
-    - `compatibility-too-long`: when `compatibility` is present, it must be a string of at most 500
-      characters.
-    - `metadata-not-string-map`: when `metadata` is present, verify it is a YAML mapping whose keys
-      are strings and advise when values are unquoted non-scalars.
-    - `allowed-tools-format`: when `allowed-tools` is present, verify it is a space-delimited string
-      (or warn when an agent-specific array is used that other agents ignore).
-    - `frontmatter-unknown-key`: flag unrecognized top-level keys outside the union of portable
-      `agentskills.io` keys (`name`, `description`, `license`, `compatibility`, `metadata`,
-      `allowed-tools`) and known agent extensions (such as Claude Code's `user-invocable`,
-      `disable-model-invocation`, `argument-hint`, `model`, `context`, `agent`, `hooks`), telling
-      the author which agents honor the key and which ignore it.
+  - **Implemented since:** `compatibility-invalid`, `metadata-not-map`, `license-not-string`,
+    `allowed-tools-invalid`, and `unknown-frontmatter-key`.
+  - **The `name` length limit is an `agentskills.io` rule, not a Claude Code one.** Claude Code's
+    docs state no maximum, and the claude-skill-lint spec deliberately refuses to invent one
+    (SR-104). Keep the 64 in the spec tier, and cite `agentskills.io` in the message.
+  - **Known-keys list (fixed 2026-11-13).** `AGENT_EXTENSION_KEYS` in `parse.rs` now holds Claude
+    Code's full documented frontmatter reference (20 fields, code.claude.com/docs/en/skills),
+    adding `effort`, `arguments`, `disallowed-tools`, `background`, `paths` and `shell`, which
+    `unknown-frontmatter-key` used to report on valid skills. The list carries the date and source
+    it was checked against; re-check it when Claude Code adds fields.
+  - **Default mode vs `--portable` mode** (adopted from the claude-skill-lint spec, SCN-005):
+    - Default: `unknown-frontmatter-key` fires only for keys no supported agent recognizes. Known
+      agent extensions are valid where the author uses them, so the default run stays silent about
+      them.
+    - `the skills lint --portable`: additionally flags every key outside the portable
+      `agentskills.io` set (`name`, `description`, `license`, `compatibility`, `metadata`,
+      `allowed-tools`) as `non-portable-field`, naming which agents honor the key and which ignore
+      it. In this mode the user asked for portability, so these are warnings, not notes.
+  - **Projected `description-budget` (warning):** Claude Code truncates `description` plus
+    `when_to_use` at 1,536 characters combined in the skill listing it shows the model (the
+    `skillListingMaxDescChars` setting changes the cap). This is separate from the `agentskills.io`
+    1,024-character `description` limit; report both, and say which is which.
+  - **Boolean fields accept YAML 1.1 forms.** Claude Code accepts `true`/`false`/`yes`/`no`/
+    `on`/`off`/`1`/`0`, case-insensitive, for `disable-model-invocation`, `user-invocable` and
+    `background` (per the claude-skill-lint spec, "v2.1.218+", not verified). `yaml-rust2` parses
+    YAML 1.2, where `off` is the *string* "off", so any type check on these fields must accept
+    those strings.
+  - **`allowed-tools` parsing:**
+    - Claude Code accepts a list (`[Read, Grep]`) and a space- or comma-separated string, so no form
+      is an error. A form other agents ignore is a `non-portable-field` in `--portable` mode only.
+    - Tokenizing must not split inside a `Tool(...)` pattern: `"Bash(git status:*) Read"` is two
+      grants, not three. Implemented as `parse::allowed_tools()`, which splits on spaces and commas
+      outside parentheses only; `unrestricted-bash` (Check 5) uses it, and the projected script
+      targets in Check 3 will too. (`allowed-tools-invalid` only checks the value's type.)
+  - **Rejected: value enums and a tool-name registry.** Validating `effort` or `model` values, or
+    tool names against a built-in list, goes stale with every agent release. Every correctness
+    fix in the claude-skill-lint spec (SR-001 to SR-005: `xhigh`, `model: inherit`, full model
+    IDs, retired tool names) was this kind of drift. `the` does not check these values.
 
-### Check 3: Fence-Aware Local Link and Bundled Asset Integrity (Projected Native)
+### Check 3: Fence-Aware Local Link and Bundled Asset Integrity (Implemented + Projected)
 
 - **User Value Proposition (USP):**
   Progressive disclosure only works if the files a skill points to actually exist. When you refactor
@@ -107,10 +146,26 @@ dependencies.
   - Scans `SKILL.md` (and any `references/*.md` files inside the skill directory) with a fence state
     machine that tracks opening and closing ```` ``` ```` and `~~~` blocks so code examples are skipped.
   - Extracts Markdown links `[label](target)` and `@[label](target)` includes outside code fences.
-  - Ignores external URIs (`http://`, `https://`, `mailto:`, `customization://`, `conversation://`),
-    pure anchors (`#section`), and template placeholders (`{...}`, `<...>`).
+  - **Implemented in [`links.rs`](../crates/the/src/skills/links.rs) (`local_path`), applied before
+    resolving:**
+    - `${CLAUDE_SKILL_DIR}` expands to the skill directory, so `${CLAUDE_SKILL_DIR}/scripts/x.py` is
+      checked like `scripts/x.py`, including the escape check.
+    - `${CLAUDE_PROJECT_DIR}` targets are skipped: the project is whichever one the session runs in,
+      so they cannot be resolved from the skill and are never reported.
+    - A target still holding `{`, `}` or `$` is a template or an unknown variable (`{{name}}.md`,
+      `$HOME/x.md`) and is skipped.
+    - A `<...>` destination is CommonMark's form for a path with spaces, so `<my file.md>` is
+      checked; only a bare word with no `/` or `.` (`<template>`, `<name>`) is a placeholder.
+  - Ignores external URIs (`http://`, `https://`, `mailto:`, `customization://`, `conversation://`)
+    and pure anchors (`#section`).
+  - Resolves non-Markdown targets (`.py`, `.sh`, `.json`, assets) as well as `.md` files.
+  - Checks that a script named in an `allowed-tools` grant exists, e.g.
+    `Bash(${CLAUDE_SKILL_DIR}/scripts/x.sh *)`, using the shared tokenizer from Check 2.
+  - Bare paths mentioned in prose but not linked (`see references/guide.txt`) are deferred, or
+    notes at most: detecting them is where false positives come from.
+  - The scanner is hand-written, not regex-based, so it runs in linear time on adversarial input.
   - Strips `#fragment` and `?query` suffixes, resolves the relative path against the containing file's
-    directory, and verifies two things:
+    directory, and verifies three things:
     1. `link-target-missing`: the target file or directory exists on disk.
     2. `link-escapes-skill`: warns if a relative link traverses outside the skill directory (or repository
        root) via `..`, which breaks if the skill is symlinked or copied to `~/.agents/skills`.
@@ -158,21 +213,28 @@ dependencies.
   or `allowed-tools: Bash(*)` in a skill copied from a scratchpad. Running a full external security
   scanner on every `the skills list` or `the skills lint` invocation would be too slow, so `the`
   includes a zero-latency, in-process smoke test that catches high-risk accidents immediately.
-- **How It Works (`skill-smoke`):**
+- **How It Works ([`smoke.rs`](../crates/the/src/skills/smoke.rs)):**
   - Runs in-memory over `SKILL.md` (and bundled text files when `the skills lint` runs) with zero
     subprocesses:
-    1. `smoke-secret-literal`: scans for high-confidence hardcoded credential literals (`sk-ant-...`,
-       `sk-...`, `AKIA[0-9A-Z]{16}`, `ghp_[A-Za-z0-9]{20,}`, `xox[baprs]-...`, and
+    1. `exposed-secret` (implemented, **error**): high-confidence hardcoded credential literals
+       (`sk-ant-...`, `sk-...`, `AKIA[0-9A-Z]{16}`, `ghp_[A-Za-z0-9]{20,}`, `xox[baprs]-...`, and
        `-----BEGIN [A-Z ]*PRIVATE KEY-----`).
-    2. `smoke-hidden-unicode`: scans for zero-width and bidirectional override characters
+    2. `trojan-source` (implemented, **error**): zero-width and bidirectional override characters
        (`\u200B`..`\u200F`, `\u202A`..`\u202E`, `\u2060`..`\u206F`, excluding a leading file BOM
        `\uFEFF` which `parse.rs` already strips cleanly).
-    3. `smoke-overbroad-permission`: flags unrestricted frontmatter tool grants (`Bash(*)`,
-       `Write(*)`) and `--dangerously-skip-permissions` in skill instructions.
-    4. `smoke-overbroad-trigger`: flags descriptions claiming universal activation (`"on every
-       message"`, `"whenever the user asks anything"`, `"always activate"`).
-  - When any smoke check fires, `the` emits a `warning[skill-smoke]` diagnostic with the file and
-    line number and suggests running `the skills audit` for a full deep scan.
+    3. `symlink-escape` (implemented, **error**): a symlink inside the skill resolving outside it.
+    4. `unrestricted-bash` (implemented, warning): grants that allow any shell command: a bare
+       `Bash` (no pattern pre-approves every command), `Bash(*)`, and any argument to `sh`/`bash`
+       in either the `:*` or the space form (`Bash(sh:*)`, `Bash(bash *)`).
+       Projected: also `Write(*)` and `--dangerously-skip-permissions` in instructions. Uses the
+       shared `allowed-tools` tokenizer (Check 2).
+    5. `overbroad-trigger` (projected, warning): descriptions claiming universal activation (`"on
+       every message"`, `"whenever the user asks anything"`, `"always activate"`).
+  - Each finding is emitted under its own code with the file and line, and suggests running
+    `the skills audit` for a full deep scan.
+  - **The three errors are a deliberate exception to INV-1** (see Conformance): those skills do
+    load in Claude Code, but a leaked secret, a hidden-character attack or an escaping symlink is
+    a safety failure, not a style problem.
 
 ---
 
@@ -219,7 +281,7 @@ the skills audit [<NAME>] [--scope <project|user|system|dir>] [--agent <claude|g
 2. `--runner npx` (or `auto` fallback): invoke `npx --yes skill-lint@0.2.0 <skill_dir> --json`.
 3. If neither `skill-lint` nor `npx` is available on `PATH`, emit an actionable
    `error[audit-runner-missing]` diagnostic explaining how to install `skill-lint` (`npm install -g skill-lint@0.2.0`)
-   while still running `the`'s native `skill-smoke` checks as a fallback.
+   while still running `the`'s native smoke checks (Check 5) as a fallback.
 
 ### JSON Ingestion and Diagnostic Mapping
 `skill-lint <dir> --json` emits `schemaVersion: 1` JSON on `stdout`:
@@ -326,16 +388,55 @@ beyond what `@haasstefan/skills-lint` can do:
 
 ---
 
-## 5. Summary Matrix of `the skills` Quality Checks
+## 5. Conformance: No False-Positive Errors
+
+Adopted from the [claude-skill-lint specification](https://github.com/shinytoyrobots/claude-skills-linter/blob/main/spec/spec.md)
+(v0.4.0), whose ordering principle is that the worst linter bug is a false positive on working code.
+
+- **INV-1:** in the default mode, no skill that the agents it targets load as valid is reported as
+  an `error`. Loader problems are `warning`s per agent (`skill-skipped`), format deviations are
+  `note`s (`skill-lint`), and portability is opt-in (`--portable`). The only exceptions are the
+  security errors of Check 5.
+- **INV-2:** `the skills lint` stays deterministic and offline: no network, no model, the same
+  output for the same input. `the skills audit` and `--tokens` delegation are separate, opt-in
+  paths.
+- **Real-repo baseline:** run `the skills lint` against a public skills repository (the
+  claude-skill-lint project uses Anthropic's skills repo) and record the finding counts per code.
+  A change in the counts must be intentional and re-recorded with the change that caused it.
+- **False-positive holdouts:** a fixture set of skills that load fine in Claude Code but are
+  written in awkward forms (`disable-model-invocation: off`, `allowed-tools:
+  "Bash(git status:*) Read"`, `description: >-` blocks, digit-leading names,
+  `${CLAUDE_SKILL_DIR}` links, 2026-only frontmatter keys), each asserted to produce no `error`.
+  This turns INV-1 into a test and sits next to the `eval-resolution.py` harness.
+- **Verify agent claims against real sessions.** The claude-skill-lint spec is a secondary source
+  for Claude Code behavior. Where `the` depends on one of its claims, check it with a real session,
+  as was done for directory-name identity.
+
+### Not yet covered: plugin skills
+
+Once `the` imitates plugins (see [skills-search.md](skills-search.md#not-imitated-yet)), apply the
+claude-skill-lint spec's plugin rules (SCN-006): a root-level `SKILL.md` next to
+`.claude-plugin/plugin.json` is a single-skill plugin; `.claude-plugin/` may contain only
+`plugin.json` and `marketplace.json`; and inside a plugin the frontmatter `name` overrides the
+directory name. This also covers sharing a workspace's skills with its repositories through a
+local plugin marketplace.
+
+---
+
+## 6. Summary Matrix of `the skills` Quality Checks
 
 | Check Code | Category | Execution Mode | Severity | What It Catches |
 |---|---|---|---|---|
 | `skill-skipped` | Agent Loadability | Native (`parse.rs`) | `warning` | Missing/invalid YAML, missing `name`, `/` in `name`, missing/non-string `description` that cause an installed agent to skip the skill |
 | `skill-conflict` | Agent Precedence | Native (`resolve.rs`) | `warning` | Duplicate skill names across roots where OpenCode's concurrent loader picks a winner nondeterministically |
-| `skill-lint` | Spec Conformance | Native (`parse.rs`) | `note` | `agentskills.io` deviations: `name` format/length, folder mismatch, `description` > 1024 chars, `compatibility` > 500 chars, non-string `metadata`, unknown frontmatter keys |
-| `skill-link` | Asset Integrity | Native (Projected) | `warning` | Broken relative links in `SKILL.md` (outside code fences) to `scripts/*`, `references/*`, or sibling files; links escaping the skill root |
+| `claude-alias-collision` | Agent Precedence | Native (`resolve.rs`) | `warning` | Two skills loaded by Claude Code share a frontmatter `name`, so `/<name>` invokes only one (identity is the directory name) |
+| `skill-lint` | Spec Conformance | Native (`parse.rs`) | `note` | `agentskills.io` deviations: `name` format/length, folder mismatch, `description` > 1024 chars, `compatibility` > 500 chars, non-string `metadata`, keys no agent recognizes |
+| `description-budget` | Listing Budget | Native (Projected) | `warning` | `description` + `when_to_use` over Claude Code's 1,536-character listing cap |
+| `non-portable-field` | Portability (`--portable` only) | Native (Projected) | `warning` | Frontmatter keys outside the portable `agentskills.io` set, with which agents honor them |
+| `broken-link`, `link-escapes-skill`, `broken-symlink` | Asset Integrity | Native (`links.rs`) | `warning` | Broken relative links in `SKILL.md` (outside code fences) to `scripts/*`, `references/*`, or sibling files; links escaping the skill root; `${CLAUDE_SKILL_DIR}` expanded, `${CLAUDE_PROJECT_DIR}` and template placeholders skipped. Projected: non-`.md` targets as a tested feature, `allowed-tools` script targets |
 | `skill-trigger` | Trigger Quality | Native (Projected) | `note` / `warning` | Missing trigger cue (`"Use when..."`), generic filler opener, or $< 4$ distinctive non-stopword tokens |
 | `skill-overlap` | Routing Collision | Native (Projected) | `warning` | Pairwise Jaccard token overlap $\ge 45\%$ (or high embedding similarity with bundled model) between two skills in the same agent scope |
-| `skill-smoke` | Security Smoke | Native (Projected) | `warning` | Hardcoded API keys/private keys, hidden zero-width/bidi Unicode characters, `Bash(*)` / `--dangerously-skip-permissions`, universal triggers |
+| `exposed-secret`, `trojan-source`, `symlink-escape` | Security Smoke | Native (`smoke.rs`) | `error` | Hardcoded API keys/private keys, hidden zero-width/bidi Unicode characters, symlinks escaping the skill (the INV-1 exception) |
+| `unrestricted-bash` | Security Smoke | Native (`smoke.rs`) | `warning` | Bare `Bash`, `Bash(*)`, `Bash(sh:*)`/`Bash(sh *)` and the `bash` forms; projected: `Write(*)`, `--dangerously-skip-permissions`, and `overbroad-trigger` for universal-activation descriptions |
 | `skill-tokens` | Context Budget | Native lines + `@haasstefan/skills-lint` $\rightarrow$ Bundled Tokenizer | `note` / `warning` | Oversized `SKILL.md` bodies ($> 500$ lines or token threshold), per-section token breakdown, and aggregate always-on catalog token cost |
 | `skill-audit` | Deep Security (`the skills audit`) | Delegated to `LichAmnesia/skill-lint` (`0.2.0`) | `warning` / `error` | Full OWASP `AST01`..`AST04` static analysis (`R01`..`R10`): prompt injection, base64 RCE, `curl \| sh`, credential exfiltration, 3-hop variable taint persistence tampering |

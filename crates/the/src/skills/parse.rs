@@ -29,17 +29,28 @@ const SPEC_KEYS: &[&str] = &[
     "allowed-tools",
 ];
 
-/// Known agent-specific frontmatter extension keys.
+/// Known agent-specific frontmatter extension keys. Claude Code's are its full "Frontmatter
+/// reference" (code.claude.com/docs/en/skills, checked 2026-11-13) minus the portable `SPEC_KEYS`.
+/// Re-check when Claude Code adds fields: a missing key here makes `unknown-frontmatter-key` fire on
+/// valid skills.
 const AGENT_EXTENSION_KEYS: &[&str] = &[
+    // Claude Code
+    "when_to_use",
     "argument-hint",
+    "arguments",
     "disable-model-invocation",
     "user-invocable",
+    "disallowed-tools",
     "model",
+    "effort",
     "context",
     "agent",
+    "background",
     "hooks",
+    "paths",
+    "shell",
+    // Other agents
     "version",
-    "when_to_use",
 ];
 
 /// Category of a deterministic skill problem.
@@ -282,10 +293,10 @@ fn to_json(y: Yaml) -> Value {
 pub fn loads(agent: Agent, p: &Parsed, dir_name: &str) -> Result<String, Problem> {
     let fm_name = p.frontmatter.get("name");
     match agent {
-        Agent::Claude => Ok(match (&p.frontmatter_error, p.str_field("name")) {
-            (None, Some(n)) if !n.is_empty() => n.to_owned(),
-            _ => dir_name.to_owned(),
-        }),
+        // Claude Code loads every skill directory and identifies it by the directory name: two
+        // directories sharing a frontmatter `name` both load (verified on 2.1.258). The frontmatter
+        // `name` only sets the `/` command, unless another skill already took it ([`claude_alias`]).
+        Agent::Claude => Ok(dir_name.to_owned()),
         Agent::Gemini | Agent::Goose | Agent::Opencode => {
             if let Some(e) = &p.frontmatter_error {
                 return Err(e.clone());
@@ -334,6 +345,67 @@ pub fn loads(agent: Agent, p: &Parsed, dir_name: &str) -> Result<String, Problem
     }
 }
 
+/// The name `the` shows for a skill: its frontmatter `name` when that parsed and is non-empty,
+/// else the directory name.
+pub fn display_name(p: &Parsed, dir_name: &str) -> String {
+    match (&p.frontmatter_error, p.str_field("name")) {
+        (None, Some(n)) if !n.is_empty() => n.to_owned(),
+        _ => dir_name.to_owned(),
+    }
+}
+
+/// The individual tool grants in an `allowed-tools` value. Claude Code accepts a YAML list or a
+/// space- or comma-separated string; a string is split only outside parentheses, so
+/// `"Bash(git status:*) Read"` is two grants (`Bash(git status:*)`, `Read`), not three. Non-string
+/// list items are ignored (`allowed-tools-invalid` reports them).
+pub fn allowed_tools(val: &Value) -> Vec<String> {
+    match val {
+        Value::String(s) => {
+            let mut out = Vec::new();
+            let mut cur = String::new();
+            let mut depth = 0usize;
+            for c in s.chars() {
+                match c {
+                    '(' => {
+                        depth += 1;
+                        cur.push(c);
+                    }
+                    ')' => {
+                        depth = depth.saturating_sub(1);
+                        cur.push(c);
+                    }
+                    c if depth == 0 && (c.is_whitespace() || c == ',') => {
+                        if !cur.is_empty() {
+                            out.push(std::mem::take(&mut cur));
+                        }
+                    }
+                    c => cur.push(c),
+                }
+            }
+            if !cur.is_empty() {
+                out.push(cur);
+            }
+            out
+        }
+        Value::Array(items) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The `/` command a skill's frontmatter `name` claims in Claude Code, if it declares one. Claude Code
+/// gives the command to only one skill when several claim it; the directory name always invokes too.
+pub fn claude_alias(p: &Parsed) -> Option<&str> {
+    match (&p.frontmatter_error, p.str_field("name")) {
+        (None, Some(n)) if !n.is_empty() => Some(n),
+        _ => None,
+    }
+}
+
 /// Advisory Agent Skills format checks; only run on frontmatter that parsed.
 pub fn lint(p: &Parsed, dir_name: &str) -> Vec<Problem> {
     let mut out = Vec::new();
@@ -360,7 +432,9 @@ pub fn lint(p: &Parsed, dir_name: &str) -> Vec<Problem> {
         if n != dir_name {
             out.push(Problem::new(
                 "name-mismatch",
-                format!("`name: {n}` differs from its directory name `{dir_name}`"),
+                format!(
+                    "`name: {n}` differs from its directory name `{dir_name}` (Claude Code lists the skill as `{dir_name}`; `/{n}` invokes it only if no other skill claims that command)"
+                ),
             ));
         }
     }
@@ -503,11 +577,28 @@ mod tests {
     }
 
     #[test]
+    fn allowed_tools_splits_outside_parentheses_only() {
+        let v = |s: &str| allowed_tools(&Value::String(s.into()));
+        assert_eq!(v("Bash(git status:*) Read"), ["Bash(git status:*)", "Read"]);
+        assert_eq!(
+            v("Read, Grep,Bash(npm run *)"),
+            ["Read", "Grep", "Bash(npm run *)"]
+        );
+        assert_eq!(v("  "), Vec::<String>::new());
+        let list = serde_json::json!(["Read", " Bash(git log) ", 5]);
+        assert_eq!(allowed_tools(&list), ["Read", "Bash(git log)"]);
+    }
+
+    #[test]
     fn agent_load_rules() {
         let ok = parse(GOOD);
-        for a in [Agent::Claude, Agent::Goose, Agent::Opencode] {
+        for a in [Agent::Goose, Agent::Opencode] {
             assert_eq!(loads(a, &ok, "dir").unwrap(), "pdf-tools");
         }
+        // Claude Code identifies a skill by its directory; `name` is the `/` command it claims.
+        assert_eq!(loads(Agent::Claude, &ok, "dir").unwrap(), "dir");
+        assert_eq!(claude_alias(&ok), Some("pdf-tools"));
+        assert_eq!(display_name(&ok, "dir"), "pdf-tools");
         let bad_yaml = parse("---\nname: a\ndescription: rule: x\n---\n");
         assert_eq!(loads(Agent::Claude, &bad_yaml, "dir").unwrap(), "dir");
         assert_eq!(

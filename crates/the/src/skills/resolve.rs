@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use super::links::check_links;
 use super::locate::SearchRoot;
-use super::parse::{Parsed, Problem, lint, loads, parse};
+use super::parse::{Parsed, Problem, claude_alias, display_name, lint, loads, parse};
 use super::scan::{Link, link_in, scan};
 use super::smoke::check_smoke;
 use super::{Agent, Scope};
@@ -81,6 +81,9 @@ pub struct Skill {
     pub locations: Vec<Location>,
     pub agents: Vec<AgentView>,
     pub lint: Vec<Problem>,
+    /// Other skills loaded by Claude Code whose frontmatter `name` claims the same `/` command; only
+    /// one of them gets it (the rest stay reachable by directory name).
+    pub claude_alias_with: Vec<PathBuf>,
 }
 
 impl Skill {
@@ -231,7 +234,7 @@ pub fn build_for(plan: &[SearchRoot], agents: &[Agent]) -> Catalog {
                 .unwrap_or(&locations[0]);
             let (path, scope) = (primary.path.clone(), primary.scope);
             let dir = dir_name(&path);
-            let name = loads(Agent::Claude, &parsed, &dir).unwrap_or(dir.clone());
+            let name = display_name(&parsed, &dir);
             let skill_dir = canonical.parent().unwrap_or(&canonical);
             let mut lint = lint(&parsed, &dir);
             lint.extend(check_links(&parsed, skill_dir));
@@ -245,6 +248,7 @@ pub fn build_for(plan: &[SearchRoot], agents: &[Agent]) -> Catalog {
                 locations,
                 agents: Vec::new(),
                 lint,
+                claude_alias_with: Vec::new(),
             }
         })
         .collect();
@@ -303,6 +307,23 @@ pub fn build_for(plan: &[SearchRoot], agents: &[Agent]) -> Catalog {
                 });
             }
         }
+    }
+    // Claude Code: skills it loads whose frontmatter `name` claims the same `/` command.
+    let claimants: Vec<(usize, String, PathBuf)> = skills
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| {
+            s.view(Agent::Claude)
+                .is_some_and(|v| v.status == Status::Loaded)
+        })
+        .filter_map(|(i, s)| claude_alias(&s.parsed).map(|a| (i, a.to_owned(), s.path.clone())))
+        .collect();
+    for (i, alias, _) in &claimants {
+        skills[*i].claude_alias_with = claimants
+            .iter()
+            .filter(|(j, a, _)| a == alias && j != i)
+            .map(|(_, _, p)| p.clone())
+            .collect();
     }
     for s in &mut skills {
         s.agents.sort_by_key(|v| v.agent);

@@ -138,6 +138,7 @@ fn unique_fixes<'a>(fixes: impl IntoIterator<Item = &'a str>) -> String {
 fn collect_diagnostics(skills: &[&Skill]) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     let mut conflicts_seen: Vec<&str> = Vec::new();
+    let mut aliases_seen: Vec<&str> = Vec::new();
     for s in skills {
         let skipped: Vec<_> = s
             .agents
@@ -184,6 +185,28 @@ fn collect_diagnostics(skills: &[&Skill]) -> Vec<Diagnostic> {
                 d = d.context(p.display().to_string());
             }
             out.push(d.help("rename all but one, or remove the duplicates"));
+        }
+
+        if !s.claude_alias_with.is_empty()
+            && let Some(alias) = super::parse::claude_alias(&s.parsed)
+            && !aliases_seen.contains(&alias)
+        {
+            aliases_seen.push(alias);
+            let mut d = Diagnostic::warning(
+                "claude-alias-collision",
+                format!(
+                    "{} skills claim the Claude Code command `/{alias}`; it invokes only one of them",
+                    s.claude_alias_with.len() + 1
+                ),
+            )
+            .context(s.path.display().to_string());
+            for p in &s.claude_alias_with {
+                d = d.context(p.display().to_string());
+            }
+            out.push(
+                d.cause("each is still listed and invocable by its directory name")
+                    .help("give each skill a unique `name:` (ideally its directory name), or remove `name:`"),
+            );
         }
 
         for p in &s.lint {
@@ -377,7 +400,7 @@ fn issue_label(code: &str) -> &'static str {
         "broken-link" => "broken relative link in SKILL.md",
         "link-escapes-skill" => "relative link escapes skill directory",
         "broken-symlink" => "dangling symlink in skill directory",
-        "unrestricted-bash" => "unrestricted Bash(*) tool permission",
+        "unrestricted-bash" => "unrestricted Bash tool permission",
         "name-format" => "invalid skill name format",
         "name-mismatch" => "skill name differs from directory",
         "description-missing" => "missing description",

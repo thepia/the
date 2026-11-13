@@ -6,16 +6,14 @@
 //! - `trojan-source`: hidden bidirectional override/isolation or zero-width Unicode characters
 //!   (excluding a valid UTF-8 BOM at byte 0).
 //! - `exposed-secret`: live-shaped credential literals or private key blocks in frontmatter/body.
-//! - `unrestricted-bash`: unrestricted `Bash(*)`, `Bash(sh:*)`, or `Bash(bash:*)` grants in
+//! - `unrestricted-bash`: unrestricted `Bash(*)`, `Bash(sh:*)`/`Bash(sh *)`, or `Bash(bash:*)`/`Bash(bash *)` grants in
 //!   `allowed-tools`.
 
 use std::fs;
 use std::path::Path;
 
-use serde_json::Value;
-
 use super::SKILL_FILE;
-use super::parse::{Parsed, Problem};
+use super::parse::{Parsed, Problem, allowed_tools};
 
 const SECRET_PREFIXES: &[&str] = &[
     "sk-ant-api03-",
@@ -250,33 +248,34 @@ fn check_unrestricted_bash(p: &Parsed, out: &mut Vec<Problem>) {
     let Some(val) = p.frontmatter.get("allowed-tools") else {
         return;
     };
-    let mut tokens: Vec<&str> = Vec::new();
-    match val {
-        Value::String(s) => {
-            tokens.extend(
-                s.split(|c: char| c.is_whitespace() || c == ',')
-                    .map(str::trim)
-                    .filter(|t| !t.is_empty()),
-            );
-        }
-        Value::Array(items) => {
-            for item in items {
-                if let Some(s) = item.as_str() {
-                    tokens.push(s.trim());
-                }
-            }
-        }
-        _ => {}
-    }
-
-    for token in tokens {
-        if matches!(token, "Bash(*)" | "Bash(sh:*)" | "Bash(bash:*)") {
+    for grant in allowed_tools(val) {
+        if is_unrestricted_bash(&grant) {
             out.push(Problem::new(
                 "unrestricted-bash",
-                format!("frontmatter `allowed-tools` grants unrestricted shell wildcard `{token}`"),
+                format!("frontmatter `allowed-tools` grants unrestricted shell access `{grant}`"),
             ));
         }
     }
+}
+
+/// Grants that allow any shell command: a bare `Bash` (no pattern pre-approves every command), and
+/// `Bash(...)` with `*` or any argument to `sh`/`bash`, in both the `:*` prefix form and the
+/// space-separated wildcard form (`Bash(sh *)`).
+fn is_unrestricted_bash(grant: &str) -> bool {
+    if grant == "Bash" {
+        return true;
+    }
+    let Some(inner) = grant
+        .strip_prefix("Bash(")
+        .and_then(|g| g.strip_suffix(')'))
+    else {
+        return false;
+    };
+    let inner = inner.split_whitespace().collect::<Vec<_>>().join(" ");
+    matches!(
+        inner.as_str(),
+        "*" | "sh:*" | "bash:*" | "sh *" | "bash *" | "sh*" | "bash*"
+    )
 }
 
 #[cfg(test)]
@@ -383,6 +382,12 @@ b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
         let scoped = "---\nname: a\ndescription: x\nallowed-tools: Read Bash(git:*) Write\n---\n";
         assert!(check_smoke(scoped, &parse(scoped), &td.skill_dir()).is_empty());
 
+        // A bare `Bash` grant has no pattern, so it pre-approves every shell command.
+        let bare = "---\nname: a\ndescription: x\nallowed-tools: Read Bash\n---\n";
+        let probs = check_smoke(bare, &parse(bare), &td.skill_dir());
+        assert_eq!(probs.len(), 1);
+        assert!(probs[0].message.contains("`Bash`"));
+
         let wild = "---\nname: a\ndescription: x\nallowed-tools: Read Bash(*) Write\n---\n";
         let probs = check_smoke(wild, &parse(wild), &td.skill_dir());
         assert_eq!(probs.len(), 1);
@@ -393,6 +398,16 @@ b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
         let probs_arr = check_smoke(wild_arr, &parse(wild_arr), &td.skill_dir());
         assert_eq!(probs_arr.len(), 2);
         assert!(probs_arr.iter().all(|p| p.code == "unrestricted-bash"));
+
+        // Space-separated wildcard forms, inside a string that also holds a spaced scoped grant.
+        let spaced = "---\nname: a\ndescription: x\nallowed-tools: \"Bash(git status:*) Bash(sh *), Bash( bash * ) Read\"\n---\n";
+        let probs = check_smoke(spaced, &parse(spaced), &td.skill_dir());
+        let found: Vec<&str> = probs.iter().map(|p| p.message.as_str()).collect();
+        assert_eq!(probs.len(), 2, "{found:?}");
+        assert!(
+            found[0].contains("`Bash(sh *)`") && found[1].contains("`Bash( bash * )`"),
+            "{found:?}"
+        );
     }
 
     #[cfg(unix)]
