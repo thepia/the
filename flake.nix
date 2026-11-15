@@ -25,24 +25,31 @@
         commonArgs = {
           src = craneLib.cleanCargoSource ./.;
           strictDeps = true;
-          pname = "the";
+          pname = "thepia";
           version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
         };
         # Dependencies build once and are cached separately from the crate.
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 
         # Builds and runs the full test suite (crane's default check phase).
-        the = craneLib.buildPackage (commonArgs // {
+        thepia = craneLib.buildPackage (commonArgs // {
           inherit cargoArtifacts;
+          postInstall = ''
+            ln -sf thepia "$out/bin/the"
+            ln -sf thepia "$out/bin/th"
+          '';
           meta.mainProgram = "the";
         });
       in
       {
-        packages.default = the;
-        apps.default = flake-utils.lib.mkApp { drv = the; };
+        packages = {
+          default = thepia;
+          inherit thepia;
+        };
+        apps.default = flake-utils.lib.mkApp { drv = thepia; };
 
         checks = {
-          inherit the;
+          inherit thepia;
           clippy = craneLib.cargoClippy (commonArgs // {
             inherit cargoArtifacts;
             cargoClippyExtraArgs = "--workspace --all-targets -- -D warnings";

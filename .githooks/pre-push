@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Pre-push gate: fast local feedback that the version is bumped before a push leaves, matching the
+# authoritative PR CI check (ci.yml `version` job). Enable with `just install-hooks`.
+set -euo pipefail
+
+# GUI git clients start with a minimal PATH; make common tool locations reachable.
+export PATH="$HOME/.cargo/bin:$HOME/.nix-profile/bin:/nix/var/nix/profiles/default/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+
+root="$(git rev-parse --show-toplevel)"
+# Refresh the base ref so the comparison sees the real main (best-effort; offline is non-fatal).
+git fetch -q --no-tags origin main:refs/remotes/origin/main 2>/dev/null || true
+bash "$root/scripts/check-version-bump.sh" origin/main

@@ -22,6 +22,7 @@ use crate::style::{self, Term};
 pub enum Tone {
     Ok,
     Warn,
+    Fail,
     Dim,
 }
 
@@ -30,6 +31,7 @@ impl Tone {
         match self {
             Tone::Ok => style::OK,
             Tone::Warn => style::WARN,
+            Tone::Fail => style::FAIL,
             Tone::Dim => style::DIM,
         }
     }
@@ -390,6 +392,7 @@ pub struct Section {
     pub key: &'static str,
     pub block: Block,
     pub human: bool,
+    pub json: bool,
 }
 
 /// A command's whole result: ordered sections.
@@ -406,26 +409,36 @@ impl Report {
         Self::default()
     }
 
-    fn add(mut self, key: &'static str, block: Block, human: bool) -> Self {
-        self.sections.push(Section { key, block, human });
+    fn add(mut self, key: &'static str, block: Block, human: bool, json: bool) -> Self {
+        self.sections.push(Section {
+            key,
+            block,
+            human,
+            json,
+        });
         self
     }
 
     pub fn table(self, key: &'static str, table: Table) -> Self {
-        self.add(key, Block::Table(table), true)
+        self.add(key, Block::Table(table), true, true)
     }
 
     pub fn record(self, key: &'static str, record: Record) -> Self {
-        self.add(key, Block::Record(record), true)
+        self.add(key, Block::Record(record), true, true)
     }
 
     pub fn text(self, key: &'static str, text: impl Into<String>) -> Self {
-        self.add(key, Block::Text(text.into()), true)
+        self.add(key, Block::Text(text.into()), true, true)
     }
 
     /// A section carried only in machine output.
     pub fn json_only(self, key: &'static str, block: Block) -> Self {
-        self.add(key, block, false)
+        self.add(key, block, false, true)
+    }
+
+    /// A section carried only in human output.
+    pub fn human_only(self, key: &'static str, block: Block) -> Self {
+        self.add(key, block, true, false)
     }
 
     pub fn render(&self, format: Format, h: Human) -> String {
@@ -457,17 +470,18 @@ impl Report {
     }
 
     fn json(&self) -> Value {
+        let json_sections: Vec<&Section> = self.sections.iter().filter(|s| s.json).collect();
         if let [
             Section {
                 block: Block::Record(r),
                 ..
             },
-        ] = self.sections.as_slice()
+        ] = json_sections.as_slice()
         {
             return r.json();
         }
         let mut m = Map::new();
-        for s in &self.sections {
+        for s in json_sections {
             let v = match &s.block {
                 Block::Table(t) => t.json(),
                 Block::Record(r) => r.json(),

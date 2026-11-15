@@ -1,11 +1,13 @@
-//! Terminal styling, ported from thepia/cli (`crates/thepia/src/style.rs`, `docs/cli-style-guide.md`
+//! Terminal styling, ported from `thepia/cli` (`crates/thepia/src/style.rs`, `docs/cli-style-guide.md`
 //! §8). A thin layer over `anstyle` (already in the tree via clap) plus a `use_color` gate honoring the
-//! ecosystem conventions. Color only reinforces words that already carry the meaning, so everything
-//! degrades to plain text when color is off. JSON is never colored.
+//! ecosystem conventions. Color only reinforces glyphs/words that already carry the meaning, so every
+//! helper degrades to plain text when color is off. JSON is never colored.
+
+#![allow(dead_code)]
 
 use std::io::IsTerminal;
 
-use anstyle::{AnsiColor, Color, Style};
+use anstyle::{AnsiColor, Color, RgbColor, Style};
 
 /// What a renderer may do on one output stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +46,16 @@ impl Term {
     pub fn paint(self, style: Style, s: &str) -> String {
         paint(self.color, style, s)
     }
+}
+
+/// Convenience: should stdout be colored right now?
+pub fn stdout_color() -> bool {
+    use_color(std::io::stdout().is_terminal())
+}
+
+/// Convenience: should stderr be colored right now?
+pub fn stderr_color() -> bool {
+    use_color(std::io::stderr().is_terminal())
 }
 
 /// Whether to emit color on a stream, given whether it is a terminal. Precedence (clig.dev,
@@ -91,6 +103,33 @@ pub const INFO: Style = Style::new().fg_color(ansi(AnsiColor::Blue));
 pub const DIM: Style = Style::new().dimmed();
 /// Primary text: headers, titles.
 pub const HEAD: Style = Style::new().bold();
+
+/// Status glyph vocabulary (cli-style-guide §8.5): `[✓]` pass, `[i]` info, `[!]` warn, `[✗]` fail.
+pub const GLYPH_PASS: &str = "[✓]";
+pub const GLYPH_INFO: &str = "[i]";
+pub const GLYPH_WARN: &str = "[!]";
+pub const GLYPH_FAIL: &str = "[✗]";
+/// Solid triangle indicator (`▲`) for inline issue highlighting and issue summary counts.
+pub const GLYPH_ISSUE: &str = "▲";
+
+/// Does the terminal advertise 24-bit truecolor? Only then do we use the exact brand lavender;
+/// otherwise the brand accent degrades to ANSI magenta (the nearest base), per the style guide.
+pub fn truecolor() -> bool {
+    std::env::var("COLORTERM")
+        .map(|v| v == "truecolor" || v == "24bit")
+        .unwrap_or(false)
+}
+
+/// The Thepia brand accent: lavender `#988ACA` (bold) where the terminal supports truecolor, else
+/// bold magenta (`cli-style-guide.md` §8.4).
+pub fn brand() -> Style {
+    let fg = if truecolor() {
+        Color::Rgb(RgbColor(0x98, 0x8A, 0xCA))
+    } else {
+        Color::Ansi(AnsiColor::Magenta)
+    };
+    Style::new().bold().fg_color(Some(fg))
+}
 
 /// Wrap `s` in the style's enable/reset sequences iff `on`.
 pub fn paint(on: bool, style: Style, s: &str) -> String {

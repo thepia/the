@@ -1,5 +1,5 @@
 [package]
-name = "the"
+name = "thepia"
 description = "Thepia command line for Linux and Nix"
 version.workspace = true
 edition.workspace = true
@@ -9,12 +9,21 @@ repository.workspace = true
 homepage.workspace = true
 
 [[bin]]
-name = "the"
+name = "thepia"
 path = "src/main.rs"
+
+[[bin]]
+name = "the"
+path = "src/bin/the.rs"
+
+[[bin]]
+name = "th"
+path = "src/bin/th.rs"
 
 [dependencies]
 anstyle.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+unicode-normalization.workspace = true
 yaml-rust2.workspace = true

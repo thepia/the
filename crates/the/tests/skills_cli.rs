@@ -23,9 +23,11 @@ impl Sandbox {
         fs::create_dir_all(base.join("home")).unwrap();
         // A repository root, so the project walks (Claude Code, OpenCode) stop here.
         fs::create_dir_all(base.join("work/.git")).unwrap();
-        Self {
+        let sb = Self {
             base: fs::canonicalize(base).unwrap(),
-        }
+        };
+        sb.install_agents(&["claude", "opencode", "goose"]);
+        sb
     }
 
     fn home(&self) -> PathBuf {
@@ -34,6 +36,26 @@ impl Sandbox {
 
     fn work(&self) -> PathBuf {
         self.base.join("work")
+    }
+
+    fn bin(&self) -> PathBuf {
+        self.base.join("bin")
+    }
+
+    fn install_agents(&self, names: &[&str]) {
+        let _ = fs::remove_dir_all(self.bin());
+        fs::create_dir_all(self.bin()).unwrap();
+        for name in names {
+            let p = self.bin().join(name);
+            fs::write(&p, "#!/bin/sh\necho 1.0.0\n").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = fs::metadata(&p).unwrap().permissions();
+                perms.set_mode(0o755);
+                fs::set_permissions(&p, perms).unwrap();
+            }
+        }
     }
 
     fn skill(&self, dir: &Path, skill_md: &str) {
@@ -49,7 +71,8 @@ impl Sandbox {
         let mut c = Command::new(env!("CARGO_BIN_EXE_the"));
         c.args(args)
             .current_dir(self.work())
-            .env("HOME", self.home());
+            .env("HOME", self.home())
+            .env("PATH", self.bin());
         // Pin every variable that changes the search plan or color; skip the host's managed Claude
         // dir. stdout/stderr are pipes here, so output is the plain (non-terminal) rendering.
         for k in [
@@ -517,4 +540,283 @@ fn color_follows_clicolor_force_and_no_color() {
 
     let off = sb.run_env(&["skills", "list"], &[("NO_COLOR", "1")]);
     assert!(!stdout(&off).contains('\u{1b}') && !stderr(&off).contains('\u{1b}'));
+}
+
+#[test]
+fn alternate_command_names_the_thepia_and_th_all_work() {
+    let sb = Sandbox::new();
+    sb.skill(
+        &sb.home().join(".claude/skills/pdf-tools"),
+        &md("pdf-tools", "Work with PDFs."),
+    );
+
+    // 1. Direct Cargo binary targets (`the`, `thepia`, `th`).
+    for bin in [
+        env!("CARGO_BIN_EXE_the"),
+        env!("CARGO_BIN_EXE_thepia"),
+        env!("CARGO_BIN_EXE_th"),
+    ] {
+        let out = Command::new(bin).arg("--version").output().unwrap();
+        assert!(out.status.success(), "{bin} failed: {}", stderr(&out));
+        assert!(
+            stdout(&out).starts_with("the "),
+            "unexpected version output from {bin}: {}",
+            stdout(&out)
+        );
+
+        let list_out = Command::new(bin)
+            .args(["skills", "list"])
+            .current_dir(sb.work())
+            .env("HOME", sb.home())
+            .env("PATH", sb.bin())
+            .env("CLAUDE_CODE_DISABLE_POLICY_SKILLS", "1")
+            .output()
+            .unwrap();
+        assert!(
+            list_out.status.success(),
+            "{bin} skills list failed: {}",
+            stderr(&list_out)
+        );
+        assert!(
+            stdout(&list_out).contains("pdf-tools"),
+            "missing skill in {bin} output: {}",
+            stdout(&list_out)
+        );
+    }
+
+    // 2. Packaged symlink layout (`the -> thepia`, `th -> thepia` as used by Nix and Homebrew).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        let pkg_bin = sb.base.join("pkg-bin");
+        fs::create_dir_all(&pkg_bin).unwrap();
+        let installed_thepia = pkg_bin.join("thepia");
+        fs::copy(env!("CARGO_BIN_EXE_thepia"), &installed_thepia).unwrap();
+        symlink("thepia", pkg_bin.join("the")).unwrap();
+        symlink("thepia", pkg_bin.join("th")).unwrap();
+
+        for name in ["thepia", "the", "th"] {
+            let exe = pkg_bin.join(name);
+            let out = Command::new(&exe)
+                .args(["skills", "list"])
+                .current_dir(sb.work())
+                .env("HOME", sb.home())
+                .env("PATH", sb.bin())
+                .env("CLAUDE_CODE_DISABLE_POLICY_SKILLS", "1")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{name} symlink failed: {}",
+                stderr(&out)
+            );
+            assert!(
+                stdout(&out).contains("pdf-tools"),
+                "{name} symlink output missing pdf-tools: {}",
+                stdout(&out)
+            );
+        }
+    }
+}
+
+#[test]
+fn list_only_considers_installed_assistants_in_agents_column() {
+    let sb = Sandbox::new();
+    // Only claude and gemini are installed (neither opencode nor goose).
+    sb.install_agents(&["claude", "gemini"]);
+
+    sb.skill(
+        &sb.home().join(".claude/skills/pdf-tools"),
+        &md("pdf-tools", "Work with PDFs."),
+    );
+    sb.skill(
+        &sb.work().join(".agents/skills/deploy"),
+        &md("deploy", "Deploy this repo."),
+    );
+    sb.skill(
+        &sb.work().join(".gemini/skills/gem-only"),
+        &md("gem-only", "Gemini skill."),
+    );
+    // Goose-only directory should not be searched when goose is not installed.
+    sb.skill(
+        &sb.home().join(".config/goose/skills/recipes"),
+        &md("recipes", "Goose recipes."),
+    );
+
+    let o = sb.run(&["skills", "list"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(
+        stdout(&o),
+        "\
+NAME       SCOPE    AGENTS  LINKED  DESCRIPTION
+deploy     project  gemini  no      Deploy this repo.
+gem-only   project  gemini  no      Gemini skill.
+pdf-tools  user     claude  no      Work with PDFs.
+"
+    );
+    assert_eq!(stderr(&o), "");
+}
+
+#[test]
+fn list_prose_form_renders_paragraph_of_skill_names() {
+    let sb = Sandbox::new();
+    sb.skill(
+        &sb.home().join(".claude/skills/pdf-tools"),
+        &md("pdf-tools", "Work with PDFs."),
+    );
+    sb.skill(
+        &sb.work().join(".agents/skills/deploy"),
+        &md("deploy", "Deploy this repo."),
+    );
+    sb.skill(
+        &sb.home().join(".config/goose/skills/recipes"),
+        &md("recipes", "Goose recipes."),
+    );
+
+    // `the skills` (no subcommand) outputs the assistants found and the paragraph of all skills.
+    let expected = "\
+[assistants]
+claude, opencode, goose
+
+[all skills]
+deploy, pdf-tools, recipes
+";
+    let top = sb.run(&["skills"]);
+    assert!(top.status.success(), "{}", stderr(&top));
+    assert_eq!(stdout(&top), expected);
+
+    // `the skills list --prose` and `--form prose` produce the same output.
+    let o = sb.run(&["skills", "list", "--prose"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(stdout(&o), expected);
+
+    let o2 = sb.run(&["skills", "list", "--form", "prose"]);
+    assert!(o2.status.success(), "{}", stderr(&o2));
+    assert_eq!(stdout(&o2), expected);
+
+    // `--by-scope` groups skills into multiple paragraphs with a heading for where/level they live.
+    let by_scope = sb.run(&["skills", "--by-scope"]);
+    assert!(by_scope.status.success(), "{}", stderr(&by_scope));
+    assert_eq!(
+        stdout(&by_scope),
+        "\
+project:
+deploy
+
+user:
+pdf-tools, recipes
+"
+    );
+
+    let list_by_scope = sb.run(&["skills", "list", "--by-scope"]);
+    assert!(list_by_scope.status.success(), "{}", stderr(&list_by_scope));
+    assert_eq!(stdout(&list_by_scope), stdout(&by_scope));
+}
+
+#[test]
+fn prose_highlights_issues_with_bang_and_summarizes_counts_without_stderr_noise() {
+    let sb = Sandbox::new();
+    sb.skill(
+        &sb.home().join(".claude/skills/clean"),
+        &md("clean", "Clean skill."),
+    );
+    sb.skill(
+        &sb.home().join(".claude/skills/bad-yaml"),
+        "---\nname: bad-yaml\ndescription: unquoted: colon\n---\nbody\n",
+    );
+    sb.skill(
+        &sb.home().join(".claude/skills/Upper"),
+        &md("Upper", "Off-spec uppercase name."),
+    );
+
+    let o = sb.run(&["skills"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(
+        stderr(&o),
+        "",
+        "prose overview summarizes issues in stdout instead of dumping per-skill stderr diagnostics"
+    );
+    assert_eq!(
+        stdout(&o),
+        "\
+[assistants]
+claude, opencode, goose
+
+[all skills]
+▲Upper, ▲bad-yaml, clean
+
+3 skills (2 with issues):
+  ▲ 1 invalid YAML frontmatter
+  ▲ 1 invalid skill name format
+"
+    );
+
+    // With forced color, error `!` is red and warning `!` is yellow.
+    let colored = sb.run_env(&["skills"], &[("CLICOLOR_FORCE", "1")]);
+    assert!(colored.status.success());
+    assert!(stdout(&colored).contains('\u{1b}'));
+}
+
+#[test]
+fn claude_code_identifies_skills_by_directory_and_flags_shared_command_names() {
+    // Verified against Claude Code 2.1.258: both directories load, listed as `alpha-dir` and
+    // `beta-dir`; `/shared-name` invokes only one of them.
+    let sb = Sandbox::new();
+    sb.skill(
+        &sb.home().join(".claude/skills/alpha-dir"),
+        &md("shared-name", "Alpha."),
+    );
+    sb.skill(
+        &sb.home().join(".claude/skills/beta-dir"),
+        &md("shared-name", "Beta."),
+    );
+
+    let o = sb.run(&["skills", "list", "--format", "json"]);
+    let v = json(&o);
+    let skills = v["skills"].as_array().unwrap();
+    assert_eq!(skills.len(), 2);
+    for s in skills {
+        assert_eq!(s["status"]["claude"]["status"], "loaded", "{s}");
+    }
+    let claude_names: Vec<&str> = skills
+        .iter()
+        .map(|s| s["status"]["claude"]["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(claude_names.len(), 2);
+    assert!(claude_names.contains(&"alpha-dir") && claude_names.contains(&"beta-dir"));
+    // Goose and OpenCode do key by frontmatter `name`.
+    let goose: Vec<&str> = skills
+        .iter()
+        .map(|s| s["status"]["goose"]["status"].as_str().unwrap())
+        .collect();
+    assert!(
+        goose.contains(&"loaded") && goose.contains(&"shadowed"),
+        "{goose:?}"
+    );
+
+    let collisions: Vec<Value> = diags(&o)
+        .into_iter()
+        .filter(|d| d["code"] == "claude-alias-collision")
+        .collect();
+    assert_eq!(collisions.len(), 1, "one warning per shared name");
+    assert_eq!(collisions[0]["level"], "warning");
+    assert_eq!(collisions[0]["context"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn documented_claude_code_frontmatter_keys_are_not_unknown() {
+    let sb = Sandbox::new();
+    sb.skill(
+        &sb.home().join(".claude/skills/modern"),
+        "---\nname: modern\ndescription: Uses 2026 Claude Code fields.\neffort: xhigh\narguments: issue\ndisallowed-tools: Write\nbackground: false\npaths: \"src/**\"\nshell: bash\nwhen_to_use: When testing.\n---\nBody.\n",
+    );
+    let o = sb.run(&["skills", "lint", "modern", "--format", "json"]);
+    let unknown: Vec<Value> = diags(&o)
+        .into_iter()
+        .filter(|d| {
+            d.to_string().contains("unknown-frontmatter-key")
+                || d.to_string().contains("unknown frontmatter key")
+        })
+        .collect();
+    assert!(unknown.is_empty(), "{unknown:?}");
 }

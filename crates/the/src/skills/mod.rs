@@ -13,10 +13,13 @@
 //! - [`cmd`]: the `the skills ...` commands, rendering through [`crate::table`].
 
 pub mod cmd;
+pub mod installed;
+pub mod links;
 pub mod locate;
 pub mod parse;
 pub mod resolve;
 pub mod scan;
+pub mod smoke;
 
 use std::fs;
 use std::path::Path;
@@ -31,6 +34,8 @@ pub const SKILL_FILE: &str = "SKILL.md";
 pub enum Agent {
     /// Claude Code.
     Claude,
+    /// Gemini CLI.
+    Gemini,
     /// OpenCode.
     Opencode,
     /// Goose.
@@ -38,11 +43,12 @@ pub enum Agent {
 }
 
 impl Agent {
-    pub const ALL: [Agent; 3] = [Agent::Claude, Agent::Opencode, Agent::Goose];
+    pub const ALL: [Agent; 4] = [Agent::Claude, Agent::Gemini, Agent::Opencode, Agent::Goose];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Agent::Claude => "claude",
+            Agent::Gemini => "gemini",
             Agent::Opencode => "opencode",
             Agent::Goose => "goose",
         }

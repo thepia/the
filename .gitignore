@@ -5,11 +5,18 @@
 /result
 /result-*
 
+# npm distribution build artifacts: platform packages (carry the native binary) and packed tarballs
+# are assembled in CI/locally from the Rust build, never committed. The launcher `npm/thepia` is tracked.
+/npm/platforms/
+/npm/dist/
+
 # Local scratch: plans, design sketches and cross-agent exchanges. Never committed; the durable
-# record lives in docs/ (see docs/skills-search.md).
+# record lives in docs/ (see docs/skills/).
 docs/scratch/
 
 # OS / editor
 .DS_Store
 .idea/
 *.swp
+
+.claude/**/*-workspace

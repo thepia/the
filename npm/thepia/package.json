@@ -1,0 +1,46 @@
+{
+  "name": "thepia",
+  "version": "0.1.0",
+  "description": "Thepia command line (`the`): inspect, validate, and refine agent skills across Claude Code, Gemini CLI, OpenCode, and Goose.",
+  "homepage": "https://thepia.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Thepia/the.git",
+    "directory": "npm/thepia"
+  },
+  "bugs": "https://github.com/Thepia/the/issues",
+  "license": "MIT OR Apache-2.0",
+  "keywords": [
+    "thepia",
+    "cli",
+    "agent-skills",
+    "skills",
+    "lint",
+    "claude-code",
+    "gemini",
+    "opencode",
+    "goose"
+  ],
+  "bin": {
+    "thepia": "bin/the.js",
+    "the": "bin/the.js",
+    "th": "bin/the.js"
+  },
+  "files": [
+    "bin/the.js",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=16"
+  },
+  "optionalDependencies": {
+    "@thepia/cli-darwin-arm64": "0.1.0",
+    "@thepia/cli-darwin-x64": "0.1.0",
+    "@thepia/cli-linux-x64": "0.1.0",
+    "@thepia/cli-linux-arm64": "0.1.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  }
+}
