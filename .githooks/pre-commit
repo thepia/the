@@ -1,10 +1,21 @@
 #!/usr/bin/env bash
-# Pre-commit gate: formatting and unit tests. Enable with `just install-hooks`.
-# The full suite (integration tests, clippy, Nix flake, doc links) runs in CI.
+# Pre-commit gate: formatting, a full compile of every target (lib, bins, and the integration test
+# binaries), and the unit tests. Enable with `just install-hooks`.
+#
+# Why compile-all but run only unit tests: the integration tests spawn the built `the` binary, and a
+# GUI git client's process tree can get those exec'd children SIGKILLed by macOS. So the hook compiles
+# the integration tests (catching a broken test file at commit time) but leaves *running* them, plus
+# clippy, the Nix flake and doc links, to CI.
 set -euo pipefail
 
 # GUI git clients start with a minimal PATH; make rustup's cargo and Nix profiles reachable.
 export PATH="$HOME/.cargo/bin:$HOME/.nix-profile/bin:/nix/var/nix/profiles/default/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 
+# Share the sccache build cache with CI and the `just` recipes (no-op if sccache is absent).
+. "$(git rev-parse --show-toplevel)/scripts/sccache-env.sh"
+
 cargo fmt --all -- --check
-cargo test --workspace --bins --quiet
+# Compile everything, including the integration test binaries, so a broken test file fails the commit.
+cargo test --workspace --all-targets --no-run --quiet
+# Run the unit tests (lib + bins); integration tests run in CI.
+cargo test --workspace --lib --bins --quiet

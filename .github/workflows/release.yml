@@ -1,0 +1,439 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+  # Every PR runs the whole pipeline as a forced dry-run (build all targets, nix, npm publish --dry-run),
+  # so a release is proven clean before merge. The publish/tag/CDN steps stay gated on dry_run == 'false'.
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Run complete dry-run only (skip CDN upload, git tag, GitHub Release, and Nix publish)"
+        required: false
+        default: true
+        type: boolean
+      force:
+        description: "Run dry-run even if Cargo.toml version is already tagged and released"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    name: Check version & release status
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.meta.outputs.should_run }}
+      dry_run: ${{ steps.meta.outputs.dry_run }}
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check if Cargo.toml version is already tagged and released
+        id: meta
+        run: |
+          version="$(python3 -c 'import tomllib, pathlib; print(tomllib.loads(pathlib.Path("Cargo.toml").read_text())["workspace"]["package"]["version"])')"
+          tag="v${version}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+          already_tagged=false
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null 2>&1 || \
+             git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+            already_tagged=true
+          fi
+
+          already_released=false
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            already_released=true
+          fi
+
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            # A PR always runs the full pipeline as a dry-run and never publishes.
+            echo "::notice::PR dry-run of the release pipeline (no publish)."
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "dry_run=true" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            dry_run="${{ inputs.dry_run }}"
+            force="${{ inputs.force }}"
+            if [[ "$already_tagged" == "true" || "$already_released" == "true" ]]; then
+              if [[ "$dry_run" == "true" || "$force" == "true" ]]; then
+                echo "::notice::${tag} already exists (tagged=${already_tagged}, released=${already_released}); running in dry-run mode."
+                echo "should_run=true" >> "$GITHUB_OUTPUT"
+                echo "dry_run=true" >> "$GITHUB_OUTPUT"
+              else
+                echo "::notice::${tag} is already tagged and released; skipping."
+                echo "should_run=false" >> "$GITHUB_OUTPUT"
+                echo "dry_run=true" >> "$GITHUB_OUTPUT"
+              fi
+            else
+              echo "should_run=true" >> "$GITHUB_OUTPUT"
+              echo "dry_run=${dry_run}" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            # Push to main: only run when Cargo.toml version has not been tagged or released yet.
+            if [[ "$already_tagged" == "true" || "$already_released" == "true" ]]; then
+              echo "::notice::Version ${tag} is already tagged (tagged=${already_tagged}) or released (released=${already_released}); skipping release pipeline."
+              echo "should_run=false" >> "$GITHUB_OUTPUT"
+              echo "dry_run=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "::notice::Version ${tag} is not yet tagged or released; starting full dry-run and release pipeline."
+              echo "should_run=true" >> "$GITHUB_OUTPUT"
+              echo "dry_run=false" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+  gate:
+    name: Dry-run gate (fmt, clippy, test, cargo package)
+    needs: check
+    if: needs.check.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+      - name: Point sccache at Bunny S3
+        shell: bash
+        env:
+          SCCACHE_BUNNY_SECRET: ${{ secrets.SCCACHE_BUNNY_SECRET }}
+        run: |
+          if [ -z "$SCCACHE_BUNNY_SECRET" ]; then
+            echo "SCCACHE_BUNNY_SECRET not set; building without the shared cache."
+            exit 0
+          fi
+          {
+            echo "RUSTC_WRAPPER=sccache"
+            echo "CARGO_INCREMENTAL=0"
+            echo "SCCACHE_BUCKET=thepia-cli-build"
+            echo "SCCACHE_ENDPOINT=de-s3.storage.bunnycdn.com"
+            echo "SCCACHE_REGION=de"
+            echo "SCCACHE_S3_USE_SSL=true"
+            echo "SCCACHE_S3_KEY_PREFIX=sccache"
+            echo "AWS_ACCESS_KEY_ID=thepia-cli-build"
+            echo "AWS_SECRET_ACCESS_KEY=$SCCACHE_BUNNY_SECRET"
+          } >> "$GITHUB_ENV"
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - run: cargo publish --dry-run -p thepia --allow-dirty
+
+  build:
+    name: Dry-run build (${{ matrix.target }})
+    needs: [check, gate]
+    if: needs.check.outputs.should_run == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            native: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            native: false
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            native: true
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            native: false
+            linker: aarch64-linux-gnu-gcc
+            cc_pkg: gcc-aarch64-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+      - name: Point sccache at Bunny S3
+        shell: bash
+        env:
+          SCCACHE_BUNNY_SECRET: ${{ secrets.SCCACHE_BUNNY_SECRET }}
+        run: |
+          if [ -z "$SCCACHE_BUNNY_SECRET" ]; then
+            echo "SCCACHE_BUNNY_SECRET not set; building without the shared cache."
+            exit 0
+          fi
+          {
+            echo "RUSTC_WRAPPER=sccache"
+            echo "CARGO_INCREMENTAL=0"
+            echo "SCCACHE_BUCKET=thepia-cli-build"
+            echo "SCCACHE_ENDPOINT=de-s3.storage.bunnycdn.com"
+            echo "SCCACHE_REGION=de"
+            echo "SCCACHE_S3_USE_SSL=true"
+            echo "SCCACHE_S3_KEY_PREFIX=sccache"
+            echo "AWS_ACCESS_KEY_ID=thepia-cli-build"
+            echo "AWS_SECRET_ACCESS_KEY=$SCCACHE_BUNNY_SECRET"
+          } >> "$GITHUB_ENV"
+
+      - name: Install cross-compilation toolchain
+        if: matrix.cc_pkg != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.cc_pkg }}
+
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build release binary
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.linker }}
+        run: cargo build --workspace --release --locked --target ${{ matrix.target }}
+
+      - name: Smoke-test built binary on native host
+        if: matrix.native
+        run: |
+          "target/${{ matrix.target }}/release/thepia" --version
+          "target/${{ matrix.target }}/release/the" --version
+          "target/${{ matrix.target }}/release/th" --version
+          "target/${{ matrix.target }}/release/the" skills list
+
+      - name: Package archive and SHA-256
+        run: |
+          ver="${{ needs.check.outputs.version }}"
+          target="${{ matrix.target }}"
+          stage="thepia-v${ver}-${target}"
+          mkdir -p "dist/${stage}"
+          cp "target/${target}/release/thepia" "dist/${stage}/thepia"
+          cp "target/${target}/release/the" "dist/${stage}/the"
+          cp "target/${target}/release/th" "dist/${stage}/th"
+          cp README.md docs/LICENSE-MIT docs/LICENSE-APACHE "dist/${stage}/"
+          tar -C dist -czf "dist/${stage}.tar.gz" "${stage}"
+          (cd dist && shasum -a 256 "${stage}.tar.gz" > "${stage}.tar.gz.sha256")
+
+      - name: Upload archive artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: archive-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+
+      - name: Upload raw binary for the npm channel
+        uses: actions/upload-artifact@v4
+        with:
+          name: npmbin-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/thepia
+          if-no-files-found: error
+
+  nix:
+    name: Dry-run Nix flake (${{ matrix.os }})
+    needs: [check, gate]
+    if: needs.check.outputs.should_run == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v31
+
+      - name: Verify Nix flake check and release build
+        run: |
+          nix flake check -L
+          nix build .#default -L
+          ./result/bin/the --version
+          ./result/bin/the skills list
+
+  npm:
+    name: npm package (assemble + publish)
+    needs: [check, gate, build]
+    if: needs.check.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    env:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Download raw binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: npmbin-*
+          path: npm-binaries
+
+      - name: Stage binaries by target triple
+        run: |
+          mkdir -p dist-bin
+          for d in npm-binaries/npmbin-*; do
+            triple="${d#npm-binaries/npmbin-}"
+            mkdir -p "dist-bin/${triple}"
+            cp "${d}/thepia" "dist-bin/${triple}/thepia"
+          done
+          ls -R dist-bin
+
+      - name: Assemble launcher + platform packages
+        run: node scripts/build-npm.mjs assemble --from dist-bin
+
+      # Always verify packaging (no token needed). Platform packages first so the launcher's
+      # optionalDependencies already resolve once it appears.
+      - name: Publish dry-run
+        run: |
+          for p in npm/platforms/*/; do npm publish --dry-run "./${p}"; done
+          npm publish --dry-run ./npm/thepia
+
+      - name: Publish to npm
+        if: needs.check.outputs.dry_run == 'false' && env.NPM_TOKEN != ''
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          for p in npm/platforms/*/; do npm publish "./${p}"; done
+          npm publish ./npm/thepia
+
+  package:
+    name: Assemble release bundle
+    needs: [check, build, nix]
+    if: needs.check.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download release archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: archive-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS and release.json
+        env:
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          cd dist
+          cat *.tar.gz.sha256 | sort -k2 > SHA256SUMS
+          cat SHA256SUMS
+
+          # No Homebrew formula: on macOS the `thepia` Homebrew identity is owned by the closed
+          # thepia/cli cask (decision A, see docs/DEVELOP.md). `the` ships via Nix, cargo, and the
+          # cdn.thepia.com curl|sh installer only.
+          python3 - "${VERSION}" "https://cdn.thepia.com/the/${VERSION}" "SHA256SUMS" > release.json <<'PY'
+          import datetime, json, sys
+          from pathlib import Path
+
+          version, base_url, sums_path = sys.argv[1], sys.argv[2], Path(sys.argv[3])
+          assets = []
+          for line in Path(sums_path).read_text().splitlines():
+              parts = line.split()
+              if len(parts) == 2:
+                  sha256, name = parts
+                  assets.append({
+                      "name": name,
+                      "url": f"{base_url}/{name}",
+                      "sha256": sha256,
+                  })
+          print(json.dumps({
+              "package": "thepia",
+              "version": version,
+              "tag": f"v{version}",
+              "published_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "base_url": base_url,
+              "assets": assets,
+          }, indent=2))
+          PY
+
+      - name: Upload complete release bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-bundle-${{ needs.check.outputs.tag }}
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+            dist/SHA256SUMS
+            dist/release.json
+
+  # Runs ONLY after the complete dry-run (gate + build + nix + package) succeeds on main.
+  publish:
+    name: Upload to cdn.thepia.com, tag commit, and release (GitHub Release)
+    needs: [check, gate, build, nix, package]
+    if: needs.check.outputs.should_run == 'true' && needs.check.outputs.dry_run == 'false'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download verified release bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: release-bundle-${{ needs.check.outputs.tag }}
+          path: dist
+
+      - name: Upload package to cdn.thepia.com
+        env:
+          BUNNY_UPLOAD_PW: ${{ secrets.BUNNY_UPLOAD_PW }}
+          BUNNY_API_KEY: ${{ secrets.BUNNY_API_KEY }}
+          VERSION: ${{ needs.check.outputs.version }}
+        run: ./scripts/deploy-cdn.sh "${VERSION}" dist
+
+      - name: Tag commit with version (${{ needs.check.outputs.tag }})
+        env:
+          TAG: ${{ needs.check.outputs.tag }}
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${TAG}" "${{ github.sha }}" -m "thepia v${VERSION}"
+          git push origin "refs/tags/${TAG}"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.check.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: "thepia ${{ needs.check.outputs.tag }}"
+          generate_release_notes: true
+          files: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+            dist/SHA256SUMS
+            dist/release.json
+
+
+  nix-publish:
+    name: Push Nix binary cache (${{ matrix.os }})
+    needs: [check, publish]
+    # The `secrets` context is NOT valid in a job-level `if:` (only github/needs/vars/inputs are);
+    # referencing it there makes the whole workflow fail to parse (startup_failure on every push).
+    # Gate the job on `vars` and guard the token-using steps with an `env` check instead.
+    if: needs.check.outputs.should_run == 'true' && needs.check.outputs.dry_run == 'false' && vars.CACHIX_CACHE != ''
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.check.outputs.tag }}
+
+      - uses: cachix/install-nix-action@v31
+
+      - uses: cachix/cachix-action@v15
+        if: env.CACHIX_AUTH_TOKEN != ''
+        with:
+          name: ${{ vars.CACHIX_CACHE }}
+          authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
+
+      - name: Build tagged release and push to Cachix
+        if: env.CACHIX_AUTH_TOKEN != ''
+        run: nix build .#default -L

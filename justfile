@@ -9,26 +9,44 @@ default:
 
 # Debug build.
 build:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    . scripts/sccache-env.sh
     cargo build --workspace
 
 # Release build.
 build-release:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    . scripts/sccache-env.sh
     cargo build --workspace --release
 
 # Run `the` with arguments, e.g. `just run skills list`.
 run *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    . scripts/sccache-env.sh
     cargo run --quiet --bin the -- {{args}}
 
 # Unit tests only (the pre-commit hook gate).
 test-unit:
-    cargo test --workspace --bins
+    #!/usr/bin/env bash
+    set -euo pipefail
+    . scripts/sccache-env.sh
+    cargo test --workspace --lib --bins
 
 # Full test suite (unit + integration).
 test:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    . scripts/sccache-env.sh
     cargo test --workspace
 
 # Lints, warnings as errors.
 clippy:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    . scripts/sccache-env.sh
     cargo clippy --workspace --all-targets -- -D warnings
 
 # Format the code.
@@ -49,6 +67,28 @@ gate: fmt-check clippy test
 # Nix: build the package and run the flake checks (fmt, clippy, tests).
 nix-check:
     nix flake check -L
+
+# Local release dry-run: gate, release binaries (`thepia`, `the`, `th`), and cargo package check.
+release-dry-run: gate build-release
+    cargo package --list -p thepia --allow-dirty
+    ./target/release/thepia --version
+    ./target/release/the --version
+    ./target/release/th --version
+
+# Build the host-platform npm platform package from a release build, then pack the launcher + it into
+# npm/dist (local verification of the `npx thepia` channel; see ADR-0004 / docs/DEVELOP.md).
+npm-pack: build-release
+    node scripts/build-npm.mjs assemble
+    node scripts/build-npm.mjs pack
+
+# Pin the launcher's version + optionalDependencies to the Cargo.toml workspace version.
+npm-sync:
+    node scripts/build-npm.mjs sync
+
+# Private end-to-end smoke test: publish the launcher + this platform's package to a throwaway local
+# verdaccio and run `npx thepia@<pre> skills list` against it. Nothing touches npmjs.org. Needs node/npx.
+npm-smoke:
+    bash scripts/npm-smoke.sh
 
 # Use the repo's git hooks (.githooks/).
 install-hooks:

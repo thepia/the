@@ -1,94 +1,43 @@
-# the
+# thepia (`the`)
 
-**Thepia's command line for Linux and Nix.** It starts small: `the skills` shows every Agent Skill
-that Claude Code, OpenCode and Goose would load from where you stand, which of them loads each one,
-and why the others don't.
+[![CI](https://github.com/thepia/the/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/thepia/the/actions/workflows/ci.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![MSRV](https://img.shields.io/badge/rustc-1.88%2B-orange.svg)](rust-toolchain.toml)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg)](#install)
+[![Nix flake](https://img.shields.io/badge/Nix-flake-5277C3.svg?logo=nixos&logoColor=white)](flake.nix)
+[![Security Policy](https://img.shields.io/badge/security-policy-brightgreen.svg)](docs/SECURITY.md)
 
-```console
-$ the skills list
-warning[skill-skipped]: opencode and goose skip skill `notes`
-  --> ~/.claude/skills/notes/SKILL.md
-  = cause: invalid YAML at SKILL.md line 3 column 18: mapping values are not allowed in this context
-  = help: fix the YAML; a plain value containing `: ` must be quoted (`description: "..."`) or use a `>-` block
-NAME       SCOPE    AGENTS                   LINKED  DESCRIPTION
-deploy     project  opencode, goose          no      Deploy this repository to staging.
-notes      user     claude                   no      -
-pdf-tools  user     claude, opencode, goose  no      Fill, merge and extract PDF forms.
-recipes    user     goose                    no      Author goose recipes.
-review     project  claude, opencode, goose  yes     Review a diff for correctness bugs.
-```
+Keeping your local AI abilities tidy. The `~/.agents` directory becomes a place to put your skills, roles, agents, and other configs so you can apply them where needed.
 
-The table goes to stdout and the diagnostics to stderr, so `the skills list > skills.txt` stays clean.
-On a terminal, tables are colored, ruled and truncated to fit. Piped or redirected, they stay aligned
-but plain and untruncated. `NO_COLOR`, `CLICOLOR=0` and `CLICOLOR_FORCE`/`FORCE_COLOR` are honored,
-and `--no-header` drops the header row.
+The release package is **`thepia`**, which installs the **`the`** CLI command (along with **`thepia`** and **`th`**). Alternate names for the command are `thepia` and `th`.
 
-## Features
+## Subcommands
 
-- **One view across agents.** Searches every location Claude Code, OpenCode and Goose use, with each
-  agent's own depth, walk-up and load rules ([details](docs/skills-search.md)).
-- **Per-agent verdicts.** Each skill is *loaded*, *shadowed* by a same-named one, in an OpenCode
-  *conflict*, or *skipped*, with the reason and the fix.
-- **Symlinks spotted.** A skill or skills directory shared between agents through a symlink is one
-  entry, flagged `LINKED`, with where the link leads.
-- **Lint, kept separate.** Deviations from the published SKILL.md format are notes. Problems that
-  make an agent drop a skill are warnings.
-- **Machine-readable.** `--format json` gives typed JSON on stdout and one JSON object per
-  diagnostic on stderr. Exit codes: 0 ok, 1 error, 2 usage, 3 not found.
+- **`the skills`** - Inspect, validate, and refine agent skills across Claude Code, Gemini CLI, OpenCode, and Goose. See [docs/skills.md](docs/skills.md).
 
-## Usage
-
-```sh
-the skills list                     # every skill, which agents load it
-the skills list --agent goose       # exactly what Goose loads from here
-the skills show review              # metadata, per-agent verdict, locations, instructions
-the skills dirs                     # where each agent looks, and where symlinked dirs lead
-the skills list --dir ./vendor/skills   # also search another directory
-the skills list --format json | jq '.skills[] | select(.linked)'
-```
-
-`the skills show` reports every path a skill is reached from:
-
-```console
-$ the skills show review
-name:        review
-description: Review a diff for correctness bugs.
-scope:       project
-path:        ~/src/app/.claude/skills/review/SKILL.md
-resolved:    ~/shared/review/SKILL.md
-
-AGENT     STATUS  DETAIL
-claude    loaded  -
-opencode  loaded  -
-goose     loaded  -
-
-LOCATION                                  AGENTS                   LINKS TO
-~/src/app/.claude/skills/review/SKILL.md  claude, opencode, goose  ~/shared/review
-
-Instructions.
-```
+Run `the --help` or `the <subcommand> --help` for usage details.
 
 ## Install
 
 With Nix:
 
 ```sh
-nix run github:thepia/the -- skills list     # try it
-nix profile install github:thepia/the        # install
+nix run github:Thepia/thepia -- --help          # try it
+nix profile install github:Thepia/thepia        # install
 ```
 
 With Cargo (Rust 1.88 or newer):
 
 ```sh
-cargo install --git https://github.com/thepia/the the
+cargo install --git https://github.com/Thepia/the thepia
 ```
 
 ## Development
 
-`nix develop` (or rustup, which reads `rust-toolchain.toml`) gives the pinned toolchain. Common tasks
-are `just` recipes: `just test`, `just clippy`, `just gate` (everything CI runs on Rust), and
-`just nix-check`. `just install-hooks` enables the pre-commit gate.
+See [docs/DEVELOP.md](docs/DEVELOP.md) for architecture, design principles, and packaging details.
+
+`nix develop` (or rustup, which reads `rust-toolchain.toml`) gives the pinned toolchain. Common tasks are `just` recipes: `just test`, `just clippy`, `just gate` (everything CI runs on Rust), and `just nix-check`. `just install-hooks` enables the pre-commit gate.
 
 ## License
 
-Licensed under either of [Apache License 2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT), at your option.
+Licensed under either of [Apache License 2.0](docs/LICENSE-APACHE) or [MIT](docs/LICENSE-MIT), at your option.

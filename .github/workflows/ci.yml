@@ -19,9 +19,46 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # rustup on the runner installs the toolchain pinned in rust-toolchain.toml on first use.
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+      - name: Point sccache at Bunny S3
+        shell: bash
+        env:
+          SCCACHE_BUNNY_SECRET: ${{ secrets.SCCACHE_BUNNY_SECRET }}
+        run: |
+          if [ -z "$SCCACHE_BUNNY_SECRET" ]; then
+            echo "SCCACHE_BUNNY_SECRET not set; building without the shared cache."
+            exit 0
+          fi
+          {
+            echo "RUSTC_WRAPPER=sccache"
+            echo "CARGO_INCREMENTAL=0"
+            echo "SCCACHE_BUCKET=thepia-cli-build"
+            echo "SCCACHE_ENDPOINT=de-s3.storage.bunnycdn.com"
+            echo "SCCACHE_REGION=de"
+            echo "SCCACHE_S3_USE_SSL=true"
+            echo "SCCACHE_S3_KEY_PREFIX=sccache"
+            echo "AWS_ACCESS_KEY_ID=thepia-cli-build"
+            echo "AWS_SECRET_ACCESS_KEY=$SCCACHE_BUNNY_SECRET"
+          } >> "$GITHUB_ENV"
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+
+  version:
+    name: Version bump (PR)
+    # Authoritative per-PR gate: the version must exceed main once a version has been released
+    # (the first, untagged, release is allowed). Pairs with the local pre-push hook.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Ensure base ref is present
+        run: git fetch --no-tags origin main:refs/remotes/origin/main || true
+      - name: Version higher than main
+        run: bash scripts/check-version-bump.sh origin/main
 
   nix:
     name: Nix flake

@@ -11,9 +11,11 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use super::links::check_links;
 use super::locate::SearchRoot;
-use super::parse::{Parsed, Problem, lint, loads, parse};
+use super::parse::{Load, Parsed, Problem, claude_alias, display_name, lint, loads, parse};
 use super::scan::{Link, link_in, scan};
+use super::smoke::check_smoke;
 use super::{Agent, Scope};
 
 /// One way a skill is reached.
@@ -40,6 +42,10 @@ pub enum Status {
         with: Vec<PathBuf>,
     },
     Skipped(Problem),
+    /// `the` cannot predict this agent's verdict (Gemini with a broken-but-present
+    /// frontmatter block its unmodeled lenient parser may recover). The `Problem`
+    /// is the malformed frontmatter, still reported so it gets fixed.
+    Unknown(Problem),
 }
 
 impl Status {
@@ -49,10 +55,12 @@ impl Status {
             Status::Shadowed { .. } => "shadowed",
             Status::Conflict { .. } => "conflict",
             Status::Skipped(_) => "skipped",
+            Status::Unknown(_) => "unknown",
         }
     }
 
     /// The agent may load this skill (a conflict loads one of the contenders).
+    /// Unknown is not loaded: `the` makes no claim either way.
     pub fn is_loaded(&self) -> bool {
         matches!(self, Status::Loaded | Status::Conflict { .. })
     }
@@ -79,6 +87,9 @@ pub struct Skill {
     pub locations: Vec<Location>,
     pub agents: Vec<AgentView>,
     pub lint: Vec<Problem>,
+    /// Other skills loaded by Claude Code whose frontmatter `name` claims the same `/` command; only
+    /// one of them gets it (the rest stay reachable by directory name).
+    pub claude_alias_with: Vec<PathBuf>,
 }
 
 impl Skill {
@@ -140,6 +151,7 @@ pub struct ScanError {
 
 #[derive(Debug)]
 pub struct Catalog {
+    pub agents: Vec<Agent>,
     pub roots: Vec<RootInfo>,
     pub skills: Vec<Skill>,
     pub errors: Vec<ScanError>,
@@ -154,6 +166,10 @@ fn dir_name(skill_md: &Path) -> String {
 }
 
 pub fn build(plan: &[SearchRoot]) -> Catalog {
+    build_for(plan, &Agent::ALL)
+}
+
+pub fn build_for(plan: &[SearchRoot], agents: &[Agent]) -> Catalog {
     let mut roots: Vec<RootInfo> = Vec::new();
     for r in plan {
         match roots.iter_mut().find(|i| i.path == r.path) {
@@ -170,7 +186,7 @@ pub fn build(plan: &[SearchRoot]) -> Catalog {
 
     let mut errors = Vec::new();
     let mut by_canonical: HashMap<PathBuf, usize> = HashMap::new();
-    let mut found: Vec<(PathBuf, Parsed, Vec<Location>)> = Vec::new();
+    let mut found: Vec<(PathBuf, String, Parsed, Vec<Location>)> = Vec::new();
     for (ri, r) in plan.iter().enumerate() {
         let hits = match scan(r) {
             Ok(h) => h,
@@ -194,13 +210,14 @@ pub fn build(plan: &[SearchRoot]) -> Catalog {
                 rank: (ri, hi),
             };
             if let Some(&i) = by_canonical.get(&canonical) {
-                found[i].2.push(loc);
+                found[i].3.push(loc);
                 continue;
             }
             match fs::read_to_string(&canonical) {
                 Ok(text) => {
+                    let parsed = parse(&text);
                     by_canonical.insert(canonical.clone(), found.len());
-                    found.push((canonical, parse(&text), vec![loc]));
+                    found.push((canonical, text, parsed, vec![loc]));
                 }
                 Err(error) => {
                     if !errors.iter().any(|e: &ScanError| e.path == loc.path) {
@@ -216,15 +233,18 @@ pub fn build(plan: &[SearchRoot]) -> Catalog {
 
     let mut skills: Vec<Skill> = found
         .into_iter()
-        .map(|(canonical, parsed, locations)| {
+        .map(|(canonical, text, parsed, locations)| {
             let primary = locations
                 .iter()
                 .find(|l| l.link.is_none())
                 .unwrap_or(&locations[0]);
             let (path, scope) = (primary.path.clone(), primary.scope);
             let dir = dir_name(&path);
-            let name = loads(Agent::Claude, &parsed, &dir).unwrap_or(dir.clone());
-            let lint = lint(&parsed, &dir);
+            let name = display_name(&parsed, &dir);
+            let skill_dir = canonical.parent().unwrap_or(&canonical);
+            let mut lint = lint(&parsed, &dir);
+            lint.extend(check_links(&parsed, skill_dir));
+            lint.extend(check_smoke(&text, &parsed, skill_dir));
             Skill {
                 name,
                 scope,
@@ -234,11 +254,12 @@ pub fn build(plan: &[SearchRoot]) -> Catalog {
                 locations,
                 agents: Vec::new(),
                 lint,
+                claude_alias_with: Vec::new(),
             }
         })
         .collect();
 
-    for agent in Agent::ALL {
+    for &agent in agents {
         // (rank, skill index, name as loaded, path as reached by this agent)
         let mut loaded: Vec<((usize, usize), usize, String, PathBuf)> = Vec::new();
         for (i, s) in skills.iter_mut().enumerate() {
@@ -251,11 +272,16 @@ pub fn build(plan: &[SearchRoot]) -> Catalog {
                 continue;
             };
             match loads(agent, &s.parsed, &dir_name(&best.path)) {
-                Ok(name) => loaded.push((best.rank, i, name, best.path.clone())),
-                Err(p) => s.agents.push(AgentView {
+                Load::Loaded(name) => loaded.push((best.rank, i, name, best.path.clone())),
+                Load::Skipped(p) => s.agents.push(AgentView {
                     agent,
                     name: s.name.clone(),
                     status: Status::Skipped(p),
+                }),
+                Load::Unknown(p) => s.agents.push(AgentView {
+                    agent,
+                    name: s.name.clone(),
+                    status: Status::Unknown(p),
                 }),
             }
         }
@@ -293,6 +319,23 @@ pub fn build(plan: &[SearchRoot]) -> Catalog {
             }
         }
     }
+    // Claude Code: skills it loads whose frontmatter `name` claims the same `/` command.
+    let claimants: Vec<(usize, String, PathBuf)> = skills
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| {
+            s.view(Agent::Claude)
+                .is_some_and(|v| v.status == Status::Loaded)
+        })
+        .filter_map(|(i, s)| claude_alias(&s.parsed).map(|a| (i, a.to_owned(), s.path.clone())))
+        .collect();
+    for (i, alias, _) in &claimants {
+        skills[*i].claude_alias_with = claimants
+            .iter()
+            .filter(|(j, a, _)| a == alias && j != i)
+            .map(|(_, _, p)| p.clone())
+            .collect();
+    }
     for s in &mut skills {
         s.agents.sort_by_key(|v| v.agent);
     }
@@ -303,6 +346,7 @@ pub fn build(plan: &[SearchRoot]) -> Catalog {
             .then(a.path.cmp(&b.path))
     });
     Catalog {
+        agents: agents.to_vec(),
         roots,
         skills,
         errors,
