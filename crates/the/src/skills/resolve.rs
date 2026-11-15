@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use super::links::check_links;
 use super::locate::SearchRoot;
-use super::parse::{Parsed, Problem, claude_alias, display_name, lint, loads, parse};
+use super::parse::{Load, Parsed, Problem, claude_alias, display_name, lint, loads, parse};
 use super::scan::{Link, link_in, scan};
 use super::smoke::check_smoke;
 use super::{Agent, Scope};
@@ -42,6 +42,10 @@ pub enum Status {
         with: Vec<PathBuf>,
     },
     Skipped(Problem),
+    /// `the` cannot predict this agent's verdict (Gemini with a broken-but-present
+    /// frontmatter block its unmodeled lenient parser may recover). The `Problem`
+    /// is the malformed frontmatter, still reported so it gets fixed.
+    Unknown(Problem),
 }
 
 impl Status {
@@ -51,10 +55,12 @@ impl Status {
             Status::Shadowed { .. } => "shadowed",
             Status::Conflict { .. } => "conflict",
             Status::Skipped(_) => "skipped",
+            Status::Unknown(_) => "unknown",
         }
     }
 
     /// The agent may load this skill (a conflict loads one of the contenders).
+    /// Unknown is not loaded: `the` makes no claim either way.
     pub fn is_loaded(&self) -> bool {
         matches!(self, Status::Loaded | Status::Conflict { .. })
     }
@@ -266,11 +272,16 @@ pub fn build_for(plan: &[SearchRoot], agents: &[Agent]) -> Catalog {
                 continue;
             };
             match loads(agent, &s.parsed, &dir_name(&best.path)) {
-                Ok(name) => loaded.push((best.rank, i, name, best.path.clone())),
-                Err(p) => s.agents.push(AgentView {
+                Load::Loaded(name) => loaded.push((best.rank, i, name, best.path.clone())),
+                Load::Skipped(p) => s.agents.push(AgentView {
                     agent,
                     name: s.name.clone(),
                     status: Status::Skipped(p),
+                }),
+                Load::Unknown(p) => s.agents.push(AgentView {
+                    agent,
+                    name: s.name.clone(),
+                    status: Status::Unknown(p),
                 }),
             }
         }

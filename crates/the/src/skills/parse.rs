@@ -289,33 +289,61 @@ fn to_json(y: Yaml) -> Value {
     }
 }
 
+/// The outcome of an agent's load decision for a skill.
+#[derive(Debug, Clone)]
+pub enum Load {
+    /// The agent loads the skill, under this name.
+    Loaded(String),
+    /// The agent skips the skill and `the` is certain of it (a strict parser or
+    /// a verified rule). The `Problem` is the actionable cause.
+    Skipped(Problem),
+    /// `the` cannot predict this agent's verdict. Gemini CLI has a lenient
+    /// fallback parser `the` does not model, so when a frontmatter block is
+    /// PRESENT but not strict YAML the real Gemini may still load the skill.
+    /// The `Problem` (the malformed frontmatter) is still reported so it gets
+    /// fixed; `the` only declines to assert load-or-skip. An ABSENT block is a
+    /// certain skip, not Unknown.
+    Unknown(Problem),
+}
+
 /// Whether `agent` loads this skill, and under which name; `dir_name` is the skill directory's
 /// name as the agent reached it.
-pub fn loads(agent: Agent, p: &Parsed, dir_name: &str) -> Result<String, Problem> {
+pub fn loads(agent: Agent, p: &Parsed, dir_name: &str) -> Load {
     let fm_name = p.frontmatter.get("name");
     match agent {
         // Claude Code loads every skill directory and identifies it by the directory name: two
         // directories sharing a frontmatter `name` both load (verified on 2.1.258). The frontmatter
         // `name` only sets the `/` command, unless another skill already took it ([`claude_alias`]).
-        Agent::Claude => Ok(dir_name.to_owned()),
+        Agent::Claude => Load::Loaded(dir_name.to_owned()),
         Agent::Gemini | Agent::Goose | Agent::Opencode => {
             if let Some(e) = &p.frontmatter_error {
-                return Err(e.clone());
+                // Gemini: an ABSENT block (`no-frontmatter`) is a certain skip, but a block that is
+                // present yet not strict YAML (`frontmatter-invalid`, `frontmatter-unterminated`)
+                // may be recovered by Gemini's lenient fallback parser, which `the` does not model,
+                // so the verdict is Unknown (the malformed frontmatter is still reported for a fix).
+                // Goose and OpenCode use strict parsers, so any frontmatter error is a real skip.
+                if agent == Agent::Gemini && e.code != "no-frontmatter" {
+                    return Load::Unknown(e.clone());
+                }
+                return Load::Skipped(e.clone());
             }
             let name = match fm_name {
                 Some(Value::String(n)) if agent == Agent::Opencode || !n.is_empty() => n.clone(),
                 Some(Value::String(_)) | None => {
-                    return Err(Problem::new("name-missing", "frontmatter has no `name`"));
+                    return Load::Skipped(Problem::new(
+                        "name-missing",
+                        "frontmatter has no `name`",
+                    ));
                 }
                 Some(_) => {
-                    return Err(Problem::new(
+                    return Load::Skipped(Problem::new(
                         "name-missing",
                         "frontmatter `name` is not a string",
                     ));
                 }
             };
             if agent == Agent::Goose && name.contains('/') {
-                return Err(Problem::new(
+                return Load::Skipped(Problem::new(
                     "name-has-slash",
                     format!("`name: {name}` contains `/`"),
                 ));
@@ -326,7 +354,7 @@ pub fn loads(agent: Agent, p: &Parsed, dir_name: &str) -> Result<String, Problem
                     .unwrap_or("")
                     .is_empty()
             {
-                return Err(Problem::new(
+                return Load::Skipped(Problem::new(
                     "description-missing",
                     "frontmatter has no `description`",
                 ));
@@ -336,12 +364,12 @@ pub fn loads(agent: Agent, p: &Parsed, dir_name: &str) -> Result<String, Problem
                     .get("description")
                     .is_some_and(|d| !d.is_string())
             {
-                return Err(Problem::new(
+                return Load::Skipped(Problem::new(
                     "description-not-string",
                     "frontmatter `description` is not a string",
                 ));
             }
-            Ok(name)
+            Load::Loaded(name)
         }
     }
 }
@@ -531,6 +559,30 @@ mod tests {
 
     const GOOD: &str = "---\nname: pdf-tools\ndescription: Work with PDFs.\nmetadata:\n  version: 2\n---\n\n# PDF tools\n\nDo things.\n";
 
+    impl Load {
+        fn name(&self) -> &str {
+            match self {
+                Load::Loaded(n) => n,
+                other => panic!("expected Loaded, got {other:?}"),
+            }
+        }
+        fn skip_code(&self) -> &str {
+            match self {
+                Load::Skipped(p) => p.code,
+                other => panic!("expected Skipped, got {other:?}"),
+            }
+        }
+        fn unknown_code(&self) -> &str {
+            match self {
+                Load::Unknown(p) => p.code,
+                other => panic!("expected Unknown, got {other:?}"),
+            }
+        }
+        fn is_loaded(&self) -> bool {
+            matches!(self, Load::Loaded(_))
+        }
+    }
+
     fn codes(p: &[Problem]) -> Vec<&'static str> {
         p.iter().map(|p| p.code).collect()
     }
@@ -597,81 +649,86 @@ mod tests {
     fn agent_load_rules() {
         let ok = parse(GOOD);
         for a in [Agent::Goose, Agent::Opencode] {
-            assert_eq!(loads(a, &ok, "dir").unwrap(), "pdf-tools");
+            assert_eq!(loads(a, &ok, "dir").name(), "pdf-tools");
         }
         // Claude Code identifies a skill by its directory; `name` is the `/` command it claims.
-        assert_eq!(loads(Agent::Claude, &ok, "dir").unwrap(), "dir");
+        assert_eq!(loads(Agent::Claude, &ok, "dir").name(), "dir");
         assert_eq!(claude_alias(&ok), Some("pdf-tools"));
         assert_eq!(display_name(&ok, "dir"), "pdf-tools");
         let bad_yaml = parse("---\nname: a\ndescription: rule: x\n---\n");
-        assert_eq!(loads(Agent::Claude, &bad_yaml, "dir").unwrap(), "dir");
+        assert_eq!(loads(Agent::Claude, &bad_yaml, "dir").name(), "dir");
         assert_eq!(
-            loads(Agent::Goose, &bad_yaml, "dir").unwrap_err().code,
+            loads(Agent::Goose, &bad_yaml, "dir").skip_code(),
             "frontmatter-invalid"
         );
         assert_eq!(
-            loads(Agent::Opencode, &bad_yaml, "dir").unwrap_err().code,
+            loads(Agent::Opencode, &bad_yaml, "dir").skip_code(),
             "frontmatter-invalid"
         );
 
         let no_name = parse("---\ndescription: d\n---\n");
-        assert_eq!(loads(Agent::Claude, &no_name, "dir").unwrap(), "dir");
+        assert_eq!(loads(Agent::Claude, &no_name, "dir").name(), "dir");
         assert_eq!(
-            loads(Agent::Goose, &no_name, "dir").unwrap_err().code,
+            loads(Agent::Goose, &no_name, "dir").skip_code(),
             "name-missing"
         );
         assert_eq!(
-            loads(Agent::Opencode, &no_name, "dir").unwrap_err().code,
+            loads(Agent::Opencode, &no_name, "dir").skip_code(),
             "name-missing"
         );
 
         let slash = parse("---\nname: a/b\ndescription: d\n---\n");
         assert_eq!(
-            loads(Agent::Goose, &slash, "dir").unwrap_err().code,
+            loads(Agent::Goose, &slash, "dir").skip_code(),
             "name-has-slash"
         );
-        assert_eq!(loads(Agent::Opencode, &slash, "dir").unwrap(), "a/b");
+        assert_eq!(loads(Agent::Opencode, &slash, "dir").name(), "a/b");
 
         let num_desc = parse("---\nname: a\ndescription: 5\n---\n");
         assert_eq!(
-            loads(Agent::Opencode, &num_desc, "a").unwrap_err().code,
+            loads(Agent::Opencode, &num_desc, "a").skip_code(),
             "description-not-string"
         );
-        assert!(loads(Agent::Goose, &num_desc, "a").is_ok());
+        assert!(loads(Agent::Goose, &num_desc, "a").is_loaded());
 
         // Gemini CLI's load rules (ST-02): a valid skill loads under its `name`;
-        // a missing `name` or a blank `description` is skipped. Previously
-        // untested, so the audit's A1/A2 Gemini defects had no guard.
-        assert_eq!(loads(Agent::Gemini, &ok, "dir").unwrap(), "pdf-tools");
+        // a missing `name` or a blank `description` is a certain skip. Previously
+        // untested, so the audit's Gemini defects had no guard.
+        assert_eq!(loads(Agent::Gemini, &ok, "dir").name(), "pdf-tools");
         assert_eq!(
-            loads(Agent::Gemini, &no_name, "dir").unwrap_err().code,
+            loads(Agent::Gemini, &no_name, "dir").skip_code(),
             "name-missing"
         );
         let blank_desc = parse("---\nname: a\ndescription: \"\"\n---\n");
         assert_eq!(
-            loads(Agent::Gemini, &blank_desc, "a").unwrap_err().code,
+            loads(Agent::Gemini, &blank_desc, "a").skip_code(),
             "description-missing"
         );
     }
 
-    // A1 (spec audit): the real Gemini CLI loads a skill whose frontmatter is
-    // not strict YAML (it falls back to a lenient line parser), skipping only
-    // when the `---` block is absent. `the` has no lenient fallback: `parse`
-    // leaves the frontmatter map empty on a YAML error, so Gemini both hits the
-    // shared `frontmatter_error` arm in `loads` AND, even past that, would find
-    // no `name` (A2). This test asserts the CORRECT target behavior and is
-    // `#[ignore]`d so CI stays green until the fallback parser lands; run it
-    // with `cargo test -- --ignored` to reproduce A1. The active red signal for
-    // A1 lives in the spec repo's `just eval-the` conformance eval.
+    // A1 (spec audit): the real Gemini CLI loads a skill whose frontmatter block
+    // is present but not strict YAML (it falls back to a lenient line parser);
+    // `the` does not model that fallback. Rather than wrongly assert a skip (or
+    // build the fallback parser), `the` returns Unknown for Gemini on a
+    // broken-but-present block, while still reporting the malformed frontmatter
+    // so it gets fixed. An ABSENT block is a certain skip. Goose/OpenCode use
+    // strict parsers, so for them a broken block is a real skip (covered above).
     #[test]
-    #[ignore = "A1: Gemini should load invalid-YAML skills; needs a lenient \
-                fallback parser (coupled to A2). Tracked in the spec repo."]
-    fn gemini_loads_invalid_yaml_a1() {
-        let bad_yaml = parse("---\nname: a\ndescription: rule: x\n---\n");
+    fn gemini_broken_frontmatter_is_unknown_absent_is_skip() {
+        let invalid = parse("---\nname: a\ndescription: rule: x\n---\n");
         assert_eq!(
-            loads(Agent::Gemini, &bad_yaml, "dir").unwrap(),
-            "a",
-            "the real Gemini CLI loads this skill via its fallback parser",
+            loads(Agent::Gemini, &invalid, "dir").unknown_code(),
+            "frontmatter-invalid"
+        );
+        let unterminated = parse("---\nname: a\n");
+        assert_eq!(
+            loads(Agent::Gemini, &unterminated, "dir").unknown_code(),
+            "frontmatter-unterminated"
+        );
+        let absent = parse("no frontmatter here\n");
+        assert_eq!(
+            loads(Agent::Gemini, &absent, "dir").skip_code(),
+            "no-frontmatter"
         );
     }
 

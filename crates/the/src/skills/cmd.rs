@@ -52,7 +52,7 @@ fn status_cell(s: &Status) -> Cell {
     let tone = match s {
         Status::Loaded => Tone::Ok,
         Status::Shadowed { .. } => Tone::Dim,
-        Status::Conflict { .. } | Status::Skipped(_) => Tone::Warn,
+        Status::Conflict { .. } | Status::Skipped(_) | Status::Unknown(_) => Tone::Warn,
     };
     Cell::toned(tone, s.as_str())
 }
@@ -113,9 +113,13 @@ fn selected<'a>(cat: &'a Catalog, search: &SearchArgs) -> Vec<&'a Skill> {
         .iter()
         .filter(|s| search.scope.is_none_or(|sc| s.scope == sc))
         .filter(|s| {
-            search
-                .agent
-                .is_none_or(|a| s.view(a).is_some_and(|v| v.status.is_loaded()))
+            // Filtering to an agent keeps the skills that agent loads AND the ones whose verdict is
+            // unknown for it (Gemini + broken frontmatter): those still need surfacing so they get
+            // fixed, rather than vanishing under `--agent gemini`.
+            search.agent.is_none_or(|a| {
+                s.view(a)
+                    .is_some_and(|v| v.status.is_loaded() || matches!(v.status, Status::Unknown(_)))
+            })
         })
         .collect()
 }
@@ -168,6 +172,40 @@ fn collect_diagnostics(skills: &[&Skill]) -> Vec<Diagnostic> {
                     .context(s.path.display().to_string())
                     .cause(causes.join("; "))
                     .help(unique_fixes(skipped.iter().map(|(_, p)| p.fix))),
+            );
+        }
+
+        // Gemini verdicts `the` cannot predict (a broken-but-present frontmatter block its lenient
+        // parser may recover). Surface the malformed frontmatter so it gets fixed even when no
+        // strict agent flagged it; the verdict itself is honestly left undetermined.
+        let unknown: Vec<_> = s
+            .agents
+            .iter()
+            .filter_map(|v| match &v.status {
+                Status::Unknown(p) => Some((v.agent, p)),
+                _ => None,
+            })
+            .collect();
+        if !unknown.is_empty() {
+            let who = unknown
+                .iter()
+                .map(|(a, _)| a.as_str())
+                .collect::<Vec<_>>()
+                .join(" and ");
+            let mut causes: Vec<String> = Vec::new();
+            for (_, p) in &unknown {
+                if !causes.contains(&p.message) {
+                    causes.push(p.message.clone());
+                }
+            }
+            out.push(
+                Diagnostic::warning(
+                    "skill-unknown",
+                    format!("cannot tell whether {who} loads skill `{}`", s.name),
+                )
+                .context(s.path.display().to_string())
+                .cause(causes.join("; "))
+                .help(unique_fixes(unknown.iter().map(|(_, p)| p.fix))),
             );
         }
 
@@ -269,7 +307,7 @@ fn status_json(s: &Skill) -> Value {
         match &v.status {
             Status::Shadowed { by } => o["by"] = json!(by),
             Status::Conflict { with } => o["with"] = json!(with),
-            Status::Skipped(p) => o["problem"] = json!(p),
+            Status::Skipped(p) | Status::Unknown(p) => o["problem"] = json!(p),
             Status::Loaded => {}
         }
         m.insert(v.agent.as_str().to_owned(), o);
@@ -340,7 +378,7 @@ fn skill_issue_tone(s: &Skill) -> Option<IssueTone> {
     } else if s
         .agents
         .iter()
-        .any(|v| matches!(v.status, Status::Conflict { .. }))
+        .any(|v| matches!(v.status, Status::Conflict { .. } | Status::Unknown(_)))
         || !s.lint.is_empty()
     {
         Some(IssueTone::Warn)
@@ -477,10 +515,9 @@ fn format_issue_summary(skills: &[&Skill], h: Human) -> Option<String> {
                     .iter()
                     .any(|v| matches!(v.status, Status::Conflict { .. })),
                 _ => {
-                    s.agents
-                        .iter()
-                        .any(|v| matches!(&v.status, Status::Skipped(p) if p.code == code))
-                        || s.lint.iter().any(|p| p.code == code)
+                    s.agents.iter().any(|v| {
+                        matches!(&v.status, Status::Skipped(p) | Status::Unknown(p) if p.code == code)
+                    }) || s.lint.iter().any(|p| p.code == code)
                 }
             };
             if has_code && !count_names.contains(&s.name.as_str()) {
@@ -756,9 +793,10 @@ fn show_report(s: &Skill) -> Report {
                 )
             }
             Status::Skipped(p) => p.message.clone(),
+            Status::Unknown(p) => format!("unknown: {}", p.message),
         };
         let problem = match &v.status {
-            Status::Skipped(p) => Cell::Json(json!(p)),
+            Status::Skipped(p) | Status::Unknown(p) => Cell::Json(json!(p)),
             _ => Cell::Empty,
         };
         agents.push(vec![
@@ -989,7 +1027,7 @@ fn lint_table(skills: &[&Skill]) -> Table {
         let mut codes: Vec<String> = Vec::new();
         for v in &s.agents {
             match &v.status {
-                Status::Skipped(p) => {
+                Status::Skipped(p) | Status::Unknown(p) => {
                     if !codes.contains(&p.code.to_owned()) {
                         codes.push(p.code.to_owned());
                     }
@@ -1009,13 +1047,15 @@ fn lint_table(skills: &[&Skill]) -> Table {
         }
 
         let has_error = s.lint.iter().any(Problem::is_error);
-        let has_warning = s
-            .agents
+        let has_warning = s.agents.iter().any(|v| {
+            matches!(
+                v.status,
+                Status::Skipped(_) | Status::Conflict { .. } | Status::Unknown(_)
+            )
+        }) || s
+            .lint
             .iter()
-            .any(|v| matches!(v.status, Status::Skipped(_) | Status::Conflict { .. }))
-            || s.lint
-                .iter()
-                .any(|p| !p.is_error() && p.kind() != ProblemKind::Spec);
+            .any(|p| !p.is_error() && p.kind() != ProblemKind::Spec);
         let status = if has_error {
             Cell::toned(Tone::Fail, "error")
         } else if has_warning {
