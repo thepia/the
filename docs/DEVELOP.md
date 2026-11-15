@@ -130,6 +130,21 @@ kebab codes and semantic exit codes. Commands build a declarative
 [`Report`](../crates/the/src/table.rs) rather than printing directly, so formatting stays uniform. Keep
 new commands consistent with the existing ones.
 
+## CI gates
+
+- **PR CI** ([ci.yml](../.github/workflows/ci.yml)): `fmt` + `clippy` + `test` (ubuntu + macOS), Nix
+  flake check, doc links, skill-eval, and a **version-bump** check.
+- **Version bump every PR** ([scripts/check-version-bump.sh](../scripts/check-version-bump.sh)): the
+  `[workspace.package]` version must be strictly higher than `main` once a version has been released
+  (the first, untagged release is allowed). Enforced authoritatively in PR CI and, for fast local
+  feedback, by the `.githooks/pre-push` hook. Bump at least a patch before merging.
+- **Release dry-run on every PR** ([release.yml](../.github/workflows/release.yml)): PRs run the whole
+  release pipeline as a forced dry-run (cross-build all 4 targets, binary smoke tests, Nix build, and
+  `npm publish --dry-run` for the launcher + every platform package), so a clean release is proven
+  before merge. The publish/tag/CDN/npm-publish steps stay gated on `dry_run == 'false'`, so a PR never
+  publishes. Note: a dry-run does not authenticate, so it cannot verify publish credentials or signing.
+  To dry-run manually on a branch: dispatch **Release** with `dry_run=true` (the default).
+
 ## Contributing
 
 Open a PR against `main`. Run `just gate` before pushing and follow the existing commit style. Good

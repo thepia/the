@@ -45,6 +45,21 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
+  version:
+    name: Version bump (PR)
+    # Authoritative per-PR gate: the version must exceed main once a version has been released
+    # (the first, untagged, release is allowed). Pairs with the local pre-push hook.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Ensure base ref is present
+        run: git fetch --no-tags origin main:refs/remotes/origin/main || true
+      - name: Version higher than main
+        run: bash scripts/check-version-bump.sh origin/main
+
   nix:
     name: Nix flake
     runs-on: ubuntu-latest

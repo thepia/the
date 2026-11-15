@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - main
+  # Every PR runs the whole pipeline as a forced dry-run (build all targets, nix, npm publish --dry-run),
+  # so a release is proven clean before merge. The publish/tag/CDN steps stay gated on dry_run == 'false'.
+  pull_request:
   workflow_dispatch:
     inputs:
       dry_run:
@@ -55,7 +58,12 @@ jobs:
             already_released=true
           fi
 
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            # A PR always runs the full pipeline as a dry-run and never publishes.
+            echo "::notice::PR dry-run of the release pipeline (no publish)."
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "dry_run=true" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             dry_run="${{ inputs.dry_run }}"
             force="${{ inputs.force }}"
             if [[ "$already_tagged" == "true" || "$already_released" == "true" ]]; then
