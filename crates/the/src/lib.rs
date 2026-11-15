@@ -4,11 +4,12 @@
 //! warnings and notes go to stderr. `--format human|json` is the single switch for both.
 
 mod cli;
-mod diag;
-mod output;
 mod skills;
-mod style;
-mod table;
+
+// The CLI output primitives (diagnostics, tables, the format switch, styling) are the shared
+// `the-output` crate (ADR-0001 / WORK-0019). Re-export them at the crate root so the command modules
+// keep reaching them as `crate::{diag,table,output,style}`.
+use the_output::{diag, output, style, table};
 
 use std::process::ExitCode;
 

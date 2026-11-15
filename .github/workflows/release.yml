@@ -248,12 +248,13 @@ jobs:
           ./result/bin/the skills list
 
   npm:
-    name: npm package (assemble + publish)
+    # Validate the npm packaging only. The REAL npm publish is a manual, dev-machine step
+    # (`just npm-publish-release <ver>`): npmjs.org 2FA requires a one-time password a CI token cannot
+    # supply (EOTP), and npm is the manual sign-off channel in the two-stage release approach.
+    name: npm package (validate)
     needs: [check, gate, build]
     if: needs.check.outputs.should_run == 'true'
     runs-on: ubuntu-latest
-    env:
-      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -281,20 +282,13 @@ jobs:
       - name: Assemble launcher + platform packages
         run: node scripts/build-npm.mjs assemble --from dist-bin
 
-      # Always verify packaging (no token needed). Platform packages first so the launcher's
-      # optionalDependencies already resolve once it appears.
+      # Validate packaging (no token, no publish). Platform packages first so the launcher's
+      # optionalDependencies already resolve once it appears. The real publish is manual: a human runs
+      # `just npm-publish-release <ver>` from a dev machine (npm login supplies the 2FA OTP).
       - name: Publish dry-run
         run: |
           for p in npm/platforms/*/; do npm publish --dry-run "./${p}"; done
           npm publish --dry-run ./npm/thepia
-
-      - name: Publish to npm
-        if: needs.check.outputs.dry_run == 'false' && env.NPM_TOKEN != ''
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          for p in npm/platforms/*/; do npm publish "./${p}"; done
-          npm publish ./npm/thepia
 
   package:
     name: Assemble release bundle

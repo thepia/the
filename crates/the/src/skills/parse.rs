@@ -435,6 +435,22 @@ pub fn claude_alias(p: &Parsed) -> Option<&str> {
     }
 }
 
+/// Whether `name` satisfies the Agent Skills name format: 1-64 characters, only lowercase ASCII
+/// letters, digits and single hyphens, not starting or ending with a hyphen. Shared by the lint
+/// (`name-format`) and the fix advisor (to tell a mechanically-lowercasable name from one that needs
+/// a human-chosen replacement).
+pub fn name_format_ok(name: &str) -> bool {
+    let chars_ok = name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    !name.is_empty()
+        && name.chars().count() <= NAME_MAX
+        && chars_ok
+        && !name.starts_with('-')
+        && !name.ends_with('-')
+        && !name.contains("--")
+}
+
 /// Advisory Agent Skills format checks; only run on frontmatter that parsed.
 pub fn lint(p: &Parsed, dir_name: &str) -> Vec<Problem> {
     let mut out = Vec::new();
@@ -442,15 +458,7 @@ pub fn lint(p: &Parsed, dir_name: &str) -> Vec<Problem> {
         return out;
     }
     if let Some(n) = p.str_field("name").filter(|n| !n.is_empty()) {
-        let chars_ok = n
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
-        if n.chars().count() > NAME_MAX
-            || !chars_ok
-            || n.starts_with('-')
-            || n.ends_with('-')
-            || n.contains("--")
-        {
+        if !name_format_ok(n) {
             out.push(Problem::new(
                 "name-format",
                 format!(

@@ -67,6 +67,9 @@ pub enum SkillsCmd {
         /// Show every issue, not just the 5 most urgent.
         #[arg(long)]
         all: bool,
+        /// Recommend a fix approach per issue, classed auto / assisted / manual (writes nothing).
+        #[arg(long)]
+        advice: bool,
     },
 }
 

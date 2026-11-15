@@ -2,11 +2,10 @@
 
 use std::io::{self, Write};
 
-use clap::ValueEnum;
-
 use crate::diag::{Diagnostic, Exit};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
 pub enum Format {
     /// Human-readable text.
     Human,

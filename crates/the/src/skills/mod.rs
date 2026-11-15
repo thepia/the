@@ -13,6 +13,7 @@
 //! - [`cmd`]: the `the skills ...` commands, rendering through [`crate::table`].
 
 pub mod cmd;
+pub mod fix;
 pub mod installed;
 pub mod links;
 pub mod locate;

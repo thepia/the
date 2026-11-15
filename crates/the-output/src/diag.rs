@@ -154,6 +154,115 @@ impl Diagnostic {
     }
 }
 
+/// A prioritized, capped view over a batch of [`Diagnostic`]s for an end-of-command stderr summary:
+/// the most urgent few (errors before warnings before notes), how many were elided, and the per-level
+/// counts. Pure (no rendering) so the selection stays testable and separate from presentation. Build
+/// it with [`summarize`] and render it with [`Summary::render`]. Shared by every command that prints a
+/// table of results and then a short "most urgent issues + status line" summary (skills lint today;
+/// doctor and the other ports next).
+pub struct Summary<'a> {
+    shown: Vec<&'a Diagnostic>,
+    hidden: usize,
+    errors: usize,
+    warnings: usize,
+    notes: usize,
+}
+
+fn level_rank(level: Level) -> u8 {
+    match level {
+        Level::Error => 0,
+        Level::Warning => 1,
+        Level::Note => 2,
+    }
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 { "" } else { "s" }
+}
+
+/// Order `diags` by urgency (errors, then warnings, then notes), cap the shown set to `limit` (`None`
+/// shows all), and count each level. The sort is stable, so same-level diagnostics keep input order.
+pub fn summarize(diags: &[Diagnostic], limit: Option<usize>) -> Summary<'_> {
+    let mut order: Vec<&Diagnostic> = diags.iter().collect();
+    order.sort_by_key(|d| level_rank(d.level));
+    let shown_len = limit.map_or(order.len(), |n| order.len().min(n));
+    let count = |lvl: Level| diags.iter().filter(|d| d.level == lvl).count();
+    Summary {
+        hidden: order.len() - shown_len,
+        errors: count(Level::Error),
+        warnings: count(Level::Warning),
+        notes: count(Level::Note),
+        shown: order.into_iter().take(shown_len).collect(),
+    }
+}
+
+impl Summary<'_> {
+    /// How many diagnostics the cap elided.
+    pub fn hidden(&self) -> usize {
+        self.hidden
+    }
+
+    /// Whether any diagnostic is an error or warning (callers map this to a non-zero exit code).
+    pub fn has_error_or_warning(&self) -> bool {
+        self.errors > 0 || self.warnings > 0
+    }
+
+    /// Render for stderr: a leading blank line, the shown diagnostics (each with its context and fix),
+    /// an optional "N more … run `<more_hint>`" note when some were hidden, and a colored `= status:`
+    /// line counting issues by level. `more_hint` is the command that reveals the hidden ones (e.g.
+    /// `"the skills lint --all"`); pass `None` to omit the hint even when some were elided.
+    pub fn render(&self, term: Term, more_hint: Option<&str>) -> String {
+        // One block per issue, separated by a blank line for breathing room; the status line is the
+        // last block. Each block already ends in a newline, so joining with "\n" inserts the blanks.
+        let mut blocks: Vec<String> = self
+            .shown
+            .iter()
+            .map(|d| d.render(Format::Human, term))
+            .collect();
+        if self.hidden > 0
+            && let Some(hint) = more_hint
+        {
+            blocks.push(
+                Diagnostic::note(
+                    "more-issues",
+                    format!(
+                        "{} more issue{} not shown; run `{hint}` to see them",
+                        self.hidden,
+                        plural(self.hidden)
+                    ),
+                )
+                .render(Format::Human, term),
+            );
+        }
+        let mut parts = Vec::new();
+        if self.errors > 0 {
+            parts.push(term.paint(
+                style::FAIL.bold(),
+                &format!("{} error{}", self.errors, plural(self.errors)),
+            ));
+        }
+        if self.warnings > 0 {
+            parts.push(term.paint(
+                style::WARN.bold(),
+                &format!("{} warning{}", self.warnings, plural(self.warnings)),
+            ));
+        }
+        if self.notes > 0 {
+            parts.push(term.paint(
+                style::INFO,
+                &format!("{} note{}", self.notes, plural(self.notes)),
+            ));
+        }
+        blocks.push(format!(
+            "{} {}\n",
+            term.paint(style::DIM, "= status:"),
+            parts.join(", ")
+        ));
+        // Leading blank line separates the summary from the table; blank lines separate the blocks.
+        format!("\n{}", blocks.join("\n"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,5 +305,59 @@ mod tests {
             serde_json::from_str(&Diagnostic::warning("w", "t").render(Format::Json, Term::PLAIN))
                 .unwrap();
         assert!(w.get("exit").is_none());
+    }
+
+    fn batch() -> Vec<Diagnostic> {
+        // Deliberately out of urgency order to prove the sort.
+        vec![
+            Diagnostic::note("n1", "note one"),
+            Diagnostic::error("e1", "error one"),
+            Diagnostic::warning("w1", "warn one"),
+            Diagnostic::warning("w2", "warn two"),
+        ]
+    }
+
+    #[test]
+    fn summarize_orders_by_urgency_caps_and_counts() {
+        let diags = batch();
+        let s = summarize(&diags, Some(2));
+        // Errors first, then warnings, then notes; capped to 2.
+        assert_eq!(
+            s.shown.iter().map(|d| d.code).collect::<Vec<_>>(),
+            ["e1", "w1"]
+        );
+        assert_eq!(s.hidden(), 2);
+        assert_eq!((s.errors, s.warnings, s.notes), (1, 2, 1));
+        assert!(s.has_error_or_warning());
+        // No cap shows all and hides none.
+        assert_eq!(summarize(&diags, None).hidden(), 0);
+    }
+
+    #[test]
+    fn render_shows_more_hint_only_when_hidden_and_counts_in_status() {
+        let diags = batch();
+        let out = summarize(&diags, Some(2)).render(Term::PLAIN, Some("the skills lint --all"));
+        assert!(
+            out.starts_with('\n'),
+            "leading blank line separates from the table"
+        );
+        assert!(out.contains("error[e1]: error one"));
+        assert!(
+            out.contains("2 more issues not shown; run `the skills lint --all` to see them"),
+            "{out}"
+        );
+        assert!(
+            out.contains("= status: 1 error, 2 warnings, 1 note"),
+            "{out}"
+        );
+
+        // No cap: no more-issues note even if a hint is supplied; singular pluralization.
+        let one = summarize(&diags[..1], None).render(Term::PLAIN, Some("x"));
+        assert!(!one.contains("more issue"), "{one}");
+        assert!(one.contains("= status: 1 note"), "{one}");
+
+        // Hidden but no hint supplied: the note is omitted.
+        let no_hint = summarize(&diags, Some(1)).render(Term::PLAIN, None);
+        assert!(!no_hint.contains("more issue"), "{no_hint}");
     }
 }

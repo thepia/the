@@ -1,0 +1,22 @@
+[package]
+name = "the-output"
+description = "Rustc-quality CLI output primitives (diagnostics, tables, styling, format switch) shared by the Thepia command lines"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[features]
+# The `clap` ValueEnum derive on `Format`, so a CLI binary can use it as an `--format` arg. On by
+# default; a non-clap consumer (e.g. a daemon rendering diagnostics) disables default features to
+# take the `Diagnostic`/render types without pulling in clap.
+default = ["cli"]
+cli = ["dep:clap"]
+
+[dependencies]
+anstyle.workspace = true
+clap = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
