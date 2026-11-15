@@ -1,6 +1,6 @@
 [package]
 name = "thepia"
-description = "Thepia command line for Linux and Nix"
+description = "Thepia command line for nurturing local AI agents"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

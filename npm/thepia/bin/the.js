@@ -15,12 +15,12 @@ const os = require("node:os");
 // process.platform / process.arch → the platform package that carries this machine's binary.
 const PLATFORMS = {
   darwin: {
-    arm64: "@thepia/cli-darwin-arm64/thepia",
-    x64: "@thepia/cli-darwin-x64/thepia",
+    arm64: "thepia-cli-darwin-arm64/thepia",
+    x64: "thepia-cli-darwin-x64/thepia",
   },
   linux: {
-    x64: "@thepia/cli-linux-x64/thepia",
-    arm64: "@thepia/cli-linux-arm64/thepia",
+    x64: "thepia-cli-linux-x64/thepia",
+    arm64: "thepia-cli-linux-arm64/thepia",
   },
 };
 

@@ -27,11 +27,15 @@ const distDir = join(npmDir, "dist");
 
 // Rust target triple → npm platform package. `os`/`cpu` must equal Node's process.platform/process.arch
 // so npm installs exactly the matching package. The binary is named `thepia` inside each package.
+// UNSCOPED platform package names. `@thepia` is Thepia's PRIVATE scope (routed to GitHub Packages in
+// Thepia/corporate .npmrc), so scoping the public binary packages under it makes npm resolve them from
+// the wrong registry and silently skip them (the launcher then can't find its binary). Unscoped names
+// can't be misrouted by any scope config. Revisit a dedicated public scope later if wanted.
 const TARGETS = [
-  { triple: "aarch64-apple-darwin", pkg: "@thepia/cli-darwin-arm64", os: "darwin", cpu: "arm64" },
-  { triple: "x86_64-apple-darwin", pkg: "@thepia/cli-darwin-x64", os: "darwin", cpu: "x64" },
-  { triple: "x86_64-unknown-linux-gnu", pkg: "@thepia/cli-linux-x64", os: "linux", cpu: "x64" },
-  { triple: "aarch64-unknown-linux-gnu", pkg: "@thepia/cli-linux-arm64", os: "linux", cpu: "arm64" },
+  { triple: "aarch64-apple-darwin", pkg: "thepia-cli-darwin-arm64", os: "darwin", cpu: "arm64" },
+  { triple: "x86_64-apple-darwin", pkg: "thepia-cli-darwin-x64", os: "darwin", cpu: "x64" },
+  { triple: "x86_64-unknown-linux-gnu", pkg: "thepia-cli-linux-x64", os: "linux", cpu: "x64" },
+  { triple: "aarch64-unknown-linux-gnu", pkg: "thepia-cli-linux-arm64", os: "linux", cpu: "arm64" },
 ];
 
 function workspaceVersion() {
@@ -145,21 +149,26 @@ function parseArgs(argv) {
   const positional = [];
   let pre = process.env.THEPIA_NPM_PRE || null;
   let registry = process.env.THEPIA_NPM_REGISTRY || "https://registry.npmjs.org";
+  let versionOverride = process.env.THEPIA_NPM_VERSION || null;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--pre") pre = argv[++i];
     else if (a.startsWith("--pre=")) pre = a.slice("--pre=".length);
     else if (a === "--registry") registry = argv[++i];
     else if (a.startsWith("--registry=")) registry = a.slice("--registry=".length);
+    else if (a === "--version") versionOverride = argv[++i];
+    else if (a.startsWith("--version=")) versionOverride = a.slice("--version=".length);
     else positional.push(a);
   }
-  return { positional, pre, registry };
+  return { positional, pre, registry, versionOverride };
 }
 
 function main() {
-  const { positional, pre, registry } = parseArgs(process.argv.slice(2));
+  const { positional, pre, registry, versionOverride } = parseArgs(process.argv.slice(2));
   const [cmd, ...rest] = positional;
-  const base = workspaceVersion();
+  // --version publishes a specific already-built release regardless of the current Cargo.toml (used by
+  // the dev-machine npm-publish-release job, which assembles from a downloaded RC's binaries).
+  const base = versionOverride || workspaceVersion();
   const version = pre ? `${base}-${pre}` : base;
 
   switch (cmd) {
@@ -179,6 +188,8 @@ function main() {
       const fromIdx = rest.indexOf("--from");
       const fromDir = fromIdx >= 0 ? resolve(rest[fromIdx + 1]) : null;
       sync(version, registry);
+      // Clean the whole platforms dir so renamed/removed packages never linger and get published.
+      rmSync(platformsDir, { recursive: true, force: true });
       let built = 0;
       for (const target of TARGETS) {
         const binary = fromDir ? join(fromDir, target.triple, "thepia") : defaultBinary(target.triple);

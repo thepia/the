@@ -1,4 +1,4 @@
-//! `thepia` (`the`): the Thepia command line for Linux and Nix.
+//! `thepia` (`the`): the Thepia command line for nurturing local AI agents.
 //!
 //! Output contract (same as thepia/cli): stdout carries only the command's result; diagnostics,
 //! warnings and notes go to stderr. `--format human|json` is the single switch for both.

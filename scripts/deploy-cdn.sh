@@ -99,7 +99,7 @@ for line in sums_path.read_text().splitlines():
             "sha256": sha256,
         })
 print(json.dumps({
-    "package": "the",
+    "package": "thepia",
     "version": version,
     "tag": f"v{version}",
     "published_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -113,6 +113,12 @@ fi
 for f in "$artifacts"/*; do
   [ -f "$f" ] || continue
   put "$f" "${base}/$(basename "$f")"
+done
+
+# 3b. The per-version manifests are the only versioned files Stage 2 (sign+notarize) rewrites to add the
+# universal, so purge them at the edge; the tarballs themselves keep immutable, never-overwritten URLs.
+for m in SHA256SUMS release.json; do
+  [ -f "$artifacts/$m" ] && purge "${cdn}/${base}/${m}"
 done
 
 # 4. Update mutable pointers (/the/latest.json and /the/latest) and edge-purge them.

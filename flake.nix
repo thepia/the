@@ -1,5 +1,5 @@
 {
-  description = "the: Thepia command line for Linux and Nix";
+  description = "the: Thepia command line for nurturing local AI agents";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";

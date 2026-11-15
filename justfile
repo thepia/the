@@ -90,6 +90,18 @@ npm-sync:
 npm-smoke:
     bash scripts/npm-smoke.sh
 
+# Dev-machine npm publish of an already-built release: download the RC's Stage-1 binaries from the
+# GitHub Release and publish the launcher + platform packages to npmjs.org (local `npm login` supplies
+# the 2FA OTP that CI can't). e.g. `just npm-publish-release 0.1.0` or `... 0.1.0 --tag rc --dry-run`.
+npm-publish-release *args:
+    bash scripts/npm-publish-release.sh {{args}}
+
+# SPIKE (WORK-0020): dev-machine Stage 2. Sign (+ notarize) the latest RC's macOS binaries into a
+# universal and publish it to the GitHub Release + CDN. Reuses the cli Developer-ID identity + notary
+# profile. e.g. `just finish-sign`, `just finish-sign 0.1.0 --dry-run`, `... 0.1.0 --no-notarize`.
+finish-sign *args:
+    bash scripts/finish-sign.sh {{args}}
+
 # Use the repo's git hooks (.githooks/).
 install-hooks:
     git config core.hooksPath .githooks

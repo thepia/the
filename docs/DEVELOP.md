@@ -72,16 +72,12 @@ pins every version to the `Cargo.toml` workspace version:
 | `just npm-sync` | Pin the launcher version + `optionalDependencies` to `Cargo.toml` |
 | `just npm-pack` | Release-build, assemble the host platform package, and `npm pack` into `npm/dist` |
 | `just npm-smoke` | Publish to a throwaway local verdaccio and run `npx thepia@<pre> skills list` against it (nothing touches npmjs.org) |
-
-For a public beta before claiming `latest`, stamp a prerelease and publish under a dist-tag:
-`node scripts/build-npm.mjs assemble --from <dir> --pre beta.0` then `npm publish --tag beta` each package;
-users test with `npx thepia@beta skills lint`.
+| `just npm-publish-release <ver> [--tag t] [--dry-run]` | Dev-machine npm publish of a built release (downloads the RC's binaries from the GitHub Release) |
 | `node scripts/build-npm.mjs platform <triple> <binary>` | Build one platform package from a built binary |
 | `node scripts/build-npm.mjs assemble --from <dir>` | Build every platform whose `<dir>/<triple>/thepia` exists |
 
-CI assembles and publishes in [`release.yml`](../.github/workflows/release.yml) (the `npm` job): it
-dry-runs the publish on every release run and publishes the platform packages first, then the launcher,
-when `NPM_TOKEN` is set. A later move to OIDC Trusted Publishing can drop the token (github-policy Phase 7).
+npm is published from a dev machine, not CI (`npm login` supplies the 2FA OTP CI can't). Run
+`npm login` once, then `just npm-publish-release <version>`; `--dry-run` validates without auth.
 
 ## Codebase layout
 

@@ -8,7 +8,11 @@ use crate::output::Format;
 use crate::skills::{Agent, Scope};
 
 #[derive(Debug, Parser)]
-#[command(name = "the", version, about = "Thepia command line for Linux and Nix")]
+#[command(
+    name = "the",
+    version,
+    about = "Thepia command line for nurturing local AI agents"
+)]
 pub struct Cli {
     /// Output format for results (stdout) and diagnostics (stderr).
     #[arg(long, alias = "output", global = true, value_enum, default_value_t = Format::Human)]
@@ -24,7 +28,7 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Agent Skills as Claude Code, Gemini CLI, OpenCode and Goose find them from here.
+    /// Agent Skills quality managed for local AI assistants use.
     Skills(SkillsArgs),
 }
 

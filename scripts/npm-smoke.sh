@@ -44,6 +44,7 @@ cargo build --bin thepia
 BIN="$ROOT/target/debug/thepia"
 [ -x "$BIN" ] || { echo "npm-smoke: binary not found at $BIN" >&2; exit 1; }
 
+rm -rf "$ROOT/npm/platforms" "$ROOT/npm/dist"   # drop stale/renamed platform dirs before building
 node scripts/build-npm.mjs platform "$TRIPLE" "$BIN" --pre "$PRE" --registry "$REGISTRY"
 VERSION="$(node -e "process.stdout.write(require('./npm/thepia/package.json').version)")"
 echo ">> assembled thepia@${VERSION} -> ${REGISTRY}" >&2

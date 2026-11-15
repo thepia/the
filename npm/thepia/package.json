@@ -1,6 +1,6 @@
 {
   "name": "thepia",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Thepia command line (`the`): inspect, validate, and refine agent skills across Claude Code, Gemini CLI, OpenCode, and Goose.",
   "homepage": "https://thepia.com",
   "repository": {
@@ -34,10 +34,10 @@
     "node": ">=16"
   },
   "optionalDependencies": {
-    "@thepia/cli-darwin-arm64": "0.1.0",
-    "@thepia/cli-darwin-x64": "0.1.0",
-    "@thepia/cli-linux-x64": "0.1.0",
-    "@thepia/cli-linux-arm64": "0.1.0"
+    "thepia-cli-darwin-arm64": "0.1.1",
+    "thepia-cli-darwin-x64": "0.1.1",
+    "thepia-cli-linux-x64": "0.1.1",
+    "thepia-cli-linux-arm64": "0.1.1"
   },
   "publishConfig": {
     "access": "public",
