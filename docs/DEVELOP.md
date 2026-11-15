@@ -22,7 +22,6 @@ Run `just` (or `just --list`) for all tasks in [`justfile`](../justfile):
 | `just links` | Offline markdown link check via `lychee` |
 | `just gate` | Everything CI checks on Rust: `fmt-check` + `clippy` + `test` |
 | `just nix-check` | Build the Nix package and run flake checks |
-| `just eval-skills` | Run the agent-skills resolution oracle self-test and live agent verification |
 | `just install-hooks` | Point `git config core.hooksPath` to `.githooks` |
 
 ## Build cache (sccache)
@@ -133,7 +132,7 @@ new commands consistent with the existing ones.
 ## CI gates
 
 - **PR CI** ([ci.yml](../.github/workflows/ci.yml)): `fmt` + `clippy` + `test` (ubuntu + macOS), Nix
-  flake check, doc links, skill-eval, and a **version-bump** check.
+  flake check, doc links, and a **version-bump** check.
 - **Version bump every PR** ([scripts/check-version-bump.sh](../scripts/check-version-bump.sh)): the
   `[workspace.package]` version must be strictly higher than `main` once a version has been released
   (the first, untagged release is allowed). Enforced authoritatively in PR CI and, for fast local
