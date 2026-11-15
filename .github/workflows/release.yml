@@ -285,16 +285,16 @@ jobs:
       # optionalDependencies already resolve once it appears.
       - name: Publish dry-run
         run: |
-          for p in npm/platforms/*; do npm publish --dry-run "$p"; done
-          npm publish --dry-run npm/thepia
+          for p in npm/platforms/*/; do npm publish --dry-run "./${p}"; done
+          npm publish --dry-run ./npm/thepia
 
       - name: Publish to npm
         if: needs.check.outputs.dry_run == 'false' && env.NPM_TOKEN != ''
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          for p in npm/platforms/*; do npm publish "$p"; done
-          npm publish npm/thepia
+          for p in npm/platforms/*/; do npm publish "./${p}"; done
+          npm publish ./npm/thepia
 
   package:
     name: Assemble release bundle

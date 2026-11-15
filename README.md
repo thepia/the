@@ -13,7 +13,7 @@ The release package is **`thepia`**, which installs the **`the`** CLI command (a
 
 ## Subcommands
 
-- **`the skills`** - Inspect, validate, and refine agent skills across Claude Code, Gemini CLI, OpenCode, and Goose. See [docs/skills/](docs/skills/README.md).
+- **`the skills`** - Inspect, validate, and refine agent skills across Claude Code, Gemini CLI, OpenCode, and Goose. See [docs/skills.md](docs/skills.md).
 
 Run `the --help` or `the <subcommand> --help` for usage details.
 
