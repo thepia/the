@@ -435,4 +435,102 @@ mod tests {
         );
         std::fs::remove_dir_all(&base).unwrap();
     }
+
+    #[test]
+    fn gemini_reads_cwd_then_home_with_no_parent_walk() {
+        // Gemini CLI (ST-02): `.agents/skills` before `.gemini/skills` in the
+        // cwd ONLY (no parent walk), then the same two under the home dir.
+        let r = plan(&env("/nonexistent/w/deep", &[]), &[]);
+        assert_eq!(
+            paths(&r, Agent::Gemini),
+            [
+                "/nonexistent/w/deep/.agents/skills",
+                "/nonexistent/w/deep/.gemini/skills",
+                "/h/.agents/skills",
+                "/h/.gemini/skills",
+            ]
+        );
+        // GEMINI_CLI_HOME overrides the home dir for the user-scope roots.
+        let r = plan(&env("/w", &[("GEMINI_CLI_HOME", "/gh")]), &[]);
+        assert_eq!(
+            paths(&r, Agent::Gemini),
+            [
+                "/w/.agents/skills",
+                "/w/.gemini/skills",
+                "/gh/.agents/skills",
+                "/gh/.gemini/skills",
+            ]
+        );
+    }
+
+    #[test]
+    fn opencode_project_config_disable_needs_truthy_not_yes() {
+        // OPENCODE_DISABLE_PROJECT_CONFIG goes through `truthy` (true|1), unlike
+        // the external-skills flags that use Effect's boolean (also yes|on|y).
+        // So `yes` does NOT disable project config; `1` does. Guards the split.
+        let yes = plan(
+            &env("/w", &[("OPENCODE_DISABLE_PROJECT_CONFIG", "yes")]),
+            &[],
+        );
+        assert!(
+            paths(&yes, Agent::Opencode)
+                .iter()
+                .any(|p| p == "/w/.opencode/skill"),
+            "`yes` must not disable project config (truthy accepts only true|1)"
+        );
+        let one = plan(&env("/w", &[("OPENCODE_DISABLE_PROJECT_CONFIG", "1")]), &[]);
+        assert!(
+            !paths(&one, Agent::Opencode)
+                .iter()
+                .any(|p| p.contains("/w/.opencode")),
+            "`1` disables project config"
+        );
+    }
+
+    #[test]
+    fn claude_managed_path_is_os_specific() {
+        // The macOS managed/policy path was untested (the env() helper is linux).
+        let macos = Env {
+            os: "macos",
+            ..env("/nonexistent/w", &[])
+        };
+        assert_eq!(
+            paths(&plan(&macos, &[]), Agent::Claude)[0],
+            "/Library/Application Support/ClaudeCode/.claude/skills"
+        );
+        // An unknown OS has no managed/policy path; the first root is the user one.
+        let other = Env {
+            os: "other",
+            ..env("/nonexistent/w", &[])
+        };
+        assert_eq!(
+            paths(&plan(&other, &[]), Agent::Claude)[0],
+            "/h/.claude/skills"
+        );
+    }
+
+    #[test]
+    fn git_root_recognizes_a_dotgit_file_not_only_a_dir() {
+        // Worktrees and submodules use a `.git` FILE, not a directory; git_root
+        // uses `.exists()`, so the parent walk must stop at it too.
+        let base = std::env::temp_dir().join(format!("the-locate-gitfile-{}", std::process::id()));
+        let sub = base.join("repo/a");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(base.join("repo/.git"), "gitdir: /elsewhere\n").unwrap();
+        let e = Env {
+            cwd: sub.clone(),
+            home: None,
+            os: "other",
+            vars: HashMap::new(),
+        };
+        let r = plan(&e, &[]);
+        assert_eq!(
+            paths(&r, Agent::Claude),
+            [
+                sub.join(".claude/skills").display().to_string(),
+                base.join("repo/.claude/skills").display().to_string()
+            ]
+        );
+        std::fs::remove_dir_all(&base).unwrap();
+    }
 }

@@ -638,6 +638,41 @@ mod tests {
             "description-not-string"
         );
         assert!(loads(Agent::Goose, &num_desc, "a").is_ok());
+
+        // Gemini CLI's load rules (ST-02): a valid skill loads under its `name`;
+        // a missing `name` or a blank `description` is skipped. Previously
+        // untested, so the audit's A1/A2 Gemini defects had no guard.
+        assert_eq!(loads(Agent::Gemini, &ok, "dir").unwrap(), "pdf-tools");
+        assert_eq!(
+            loads(Agent::Gemini, &no_name, "dir").unwrap_err().code,
+            "name-missing"
+        );
+        let blank_desc = parse("---\nname: a\ndescription: \"\"\n---\n");
+        assert_eq!(
+            loads(Agent::Gemini, &blank_desc, "a").unwrap_err().code,
+            "description-missing"
+        );
+    }
+
+    // A1 (spec audit): the real Gemini CLI loads a skill whose frontmatter is
+    // not strict YAML (it falls back to a lenient line parser), skipping only
+    // when the `---` block is absent. `the` has no lenient fallback: `parse`
+    // leaves the frontmatter map empty on a YAML error, so Gemini both hits the
+    // shared `frontmatter_error` arm in `loads` AND, even past that, would find
+    // no `name` (A2). This test asserts the CORRECT target behavior and is
+    // `#[ignore]`d so CI stays green until the fallback parser lands; run it
+    // with `cargo test -- --ignored` to reproduce A1. The active red signal for
+    // A1 lives in the spec repo's `just eval-the` conformance eval.
+    #[test]
+    #[ignore = "A1: Gemini should load invalid-YAML skills; needs a lenient \
+                fallback parser (coupled to A2). Tracked in the spec repo."]
+    fn gemini_loads_invalid_yaml_a1() {
+        let bad_yaml = parse("---\nname: a\ndescription: rule: x\n---\n");
+        assert_eq!(
+            loads(Agent::Gemini, &bad_yaml, "dir").unwrap(),
+            "a",
+            "the real Gemini CLI loads this skill via its fallback parser",
+        );
     }
 
     #[test]
