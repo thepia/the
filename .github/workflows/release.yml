@@ -92,6 +92,28 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+      - name: Point sccache at Bunny S3
+        shell: bash
+        env:
+          SCCACHE_BUNNY_SECRET: ${{ secrets.SCCACHE_BUNNY_SECRET }}
+        run: |
+          if [ -z "$SCCACHE_BUNNY_SECRET" ]; then
+            echo "SCCACHE_BUNNY_SECRET not set; building without the shared cache."
+            exit 0
+          fi
+          {
+            echo "RUSTC_WRAPPER=sccache"
+            echo "CARGO_INCREMENTAL=0"
+            echo "SCCACHE_BUCKET=thepia-cli-build"
+            echo "SCCACHE_ENDPOINT=de-s3.storage.bunnycdn.com"
+            echo "SCCACHE_REGION=de"
+            echo "SCCACHE_S3_USE_SSL=true"
+            echo "SCCACHE_S3_KEY_PREFIX=sccache"
+            echo "AWS_ACCESS_KEY_ID=thepia-cli-build"
+            echo "AWS_SECRET_ACCESS_KEY=$SCCACHE_BUNNY_SECRET"
+          } >> "$GITHUB_ENV"
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
@@ -122,6 +144,29 @@ jobs:
             cc_pkg: gcc-aarch64-linux-gnu
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+      - name: Point sccache at Bunny S3
+        shell: bash
+        env:
+          SCCACHE_BUNNY_SECRET: ${{ secrets.SCCACHE_BUNNY_SECRET }}
+        run: |
+          if [ -z "$SCCACHE_BUNNY_SECRET" ]; then
+            echo "SCCACHE_BUNNY_SECRET not set; building without the shared cache."
+            exit 0
+          fi
+          {
+            echo "RUSTC_WRAPPER=sccache"
+            echo "CARGO_INCREMENTAL=0"
+            echo "SCCACHE_BUCKET=thepia-cli-build"
+            echo "SCCACHE_ENDPOINT=de-s3.storage.bunnycdn.com"
+            echo "SCCACHE_REGION=de"
+            echo "SCCACHE_S3_USE_SSL=true"
+            echo "SCCACHE_S3_KEY_PREFIX=sccache"
+            echo "AWS_ACCESS_KEY_ID=thepia-cli-build"
+            echo "AWS_SECRET_ACCESS_KEY=$SCCACHE_BUNNY_SECRET"
+          } >> "$GITHUB_ENV"
 
       - name: Install cross-compilation toolchain
         if: matrix.cc_pkg != ''
@@ -166,6 +211,13 @@ jobs:
             dist/*.tar.gz
             dist/*.tar.gz.sha256
 
+      - name: Upload raw binary for the npm channel
+        uses: actions/upload-artifact@v4
+        with:
+          name: npmbin-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/thepia
+          if-no-files-found: error
+
   nix:
     name: Dry-run Nix flake (${{ matrix.os }})
     needs: [check, gate]
@@ -186,6 +238,55 @@ jobs:
           nix build .#default -L
           ./result/bin/the --version
           ./result/bin/the skills list
+
+  npm:
+    name: npm package (assemble + publish)
+    needs: [check, gate, build]
+    if: needs.check.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    env:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Download raw binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: npmbin-*
+          path: npm-binaries
+
+      - name: Stage binaries by target triple
+        run: |
+          mkdir -p dist-bin
+          for d in npm-binaries/npmbin-*; do
+            triple="${d#npm-binaries/npmbin-}"
+            mkdir -p "dist-bin/${triple}"
+            cp "${d}/thepia" "dist-bin/${triple}/thepia"
+          done
+          ls -R dist-bin
+
+      - name: Assemble launcher + platform packages
+        run: node scripts/build-npm.mjs assemble --from dist-bin
+
+      # Always verify packaging (no token needed). Platform packages first so the launcher's
+      # optionalDependencies already resolve once it appears.
+      - name: Publish dry-run
+        run: |
+          for p in npm/platforms/*; do npm publish --dry-run "$p"; done
+          npm publish --dry-run npm/thepia
+
+      - name: Publish to npm
+        if: needs.check.outputs.dry_run == 'false' && env.NPM_TOKEN != ''
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          for p in npm/platforms/*; do npm publish "$p"; done
+          npm publish npm/thepia
 
   package:
     name: Assemble release bundle

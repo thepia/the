@@ -11,6 +11,9 @@ set -euo pipefail
 # GUI git clients start with a minimal PATH; make rustup's cargo and Nix profiles reachable.
 export PATH="$HOME/.cargo/bin:$HOME/.nix-profile/bin:/nix/var/nix/profiles/default/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 
+# Share the sccache build cache with CI and the `just` recipes (no-op if sccache is absent).
+. "$(git rev-parse --show-toplevel)/scripts/sccache-env.sh"
+
 cargo fmt --all -- --check
 # Compile everything, including the integration test binaries, so a broken test file fails the commit.
 cargo test --workspace --all-targets --no-run --quiet
