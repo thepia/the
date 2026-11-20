@@ -105,3 +105,8 @@ finish-sign *args:
 # Use the repo's git hooks (.githooks/).
 install-hooks:
     git config core.hooksPath .githooks
+
+# Measure test coverage (cargo-llvm-cov; needs `rustup component add llvm-tools-preview`
+# and `cargo install cargo-llvm-cov`). Per-file line/region/function coverage.
+coverage:
+    cargo llvm-cov --summary-only

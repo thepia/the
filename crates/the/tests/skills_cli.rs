@@ -820,3 +820,38 @@ fn documented_claude_code_frontmatter_keys_are_not_unknown() {
         .collect();
     assert!(unknown.is_empty(), "{unknown:?}");
 }
+
+#[test]
+fn beta_corpus_rules_are_gated_behind_the_flag() {
+    let sb = Sandbox::new();
+    // Two near-duplicate skills (descriptions differ by one word) -> a `redundant-with` candidate.
+    sb.skill(
+        &sb.home().join(".claude/skills/crawl-one"),
+        &md(
+            "crawl-one",
+            "Crawl a website directory and extract the structured profile json data for each scraped page",
+        ),
+    );
+    sb.skill(
+        &sb.home().join(".claude/skills/crawl-two"),
+        &md(
+            "crawl-two",
+            "Crawl a website directory and extract the structured profile json data for every scraped page",
+        ),
+    );
+
+    // Default: the corpus (beta) rule is staged behind `--beta`, so it is NOT reported.
+    let base = diags(&sb.run(&["--format", "json", "skills", "lint"]));
+    assert!(
+        !base.iter().any(|d| d["code"] == "redundant-with"),
+        "redundant-with must be hidden without --beta: {base:?}"
+    );
+
+    // `--beta`: the corpus rule fires as a warning naming the counterpart skill.
+    let beta = diags(&sb.run(&["--format", "json", "skills", "lint", "--beta"]));
+    let red = beta
+        .iter()
+        .find(|d| d["code"] == "redundant-with")
+        .unwrap_or_else(|| panic!("redundant-with must appear with --beta: {beta:?}"));
+    assert_eq!(red["level"], "warning", "{red:?}");
+}

@@ -22,6 +22,7 @@ path = "src/bin/th.rs"
 
 [dependencies]
 the-output = { path = "../the-output" }
+the-skills = { path = "../the-skills" }
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true

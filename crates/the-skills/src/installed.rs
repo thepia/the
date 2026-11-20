@@ -24,7 +24,7 @@ use std::process::{Command, Output};
 use clap::ValueEnum;
 use serde::Serialize;
 
-use super::locate::Env;
+use crate::locate::Env;
 
 /// Known agent CLIs that `installed` scans for and drives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, ValueEnum)]
@@ -61,12 +61,12 @@ impl AgentKind {
         self.as_str()
     }
 
-    pub fn to_skill_agent(self) -> super::Agent {
+    pub fn to_skill_agent(self) -> crate::Agent {
         match self {
-            AgentKind::Claude => super::Agent::Claude,
-            AgentKind::Gemini => super::Agent::Gemini,
-            AgentKind::Opencode => super::Agent::Opencode,
-            AgentKind::Goose => super::Agent::Goose,
+            AgentKind::Claude => crate::Agent::Claude,
+            AgentKind::Gemini => crate::Agent::Gemini,
+            AgentKind::Opencode => crate::Agent::Opencode,
+            AgentKind::Goose => crate::Agent::Goose,
         }
     }
 
@@ -526,8 +526,8 @@ pub fn scan_installed(env: &Env) -> Vec<InstalledAgent> {
         .collect()
 }
 
-/// Return the [`super::Agent`]s whose CLI binaries are installed on the system.
-pub fn installed_agents(env: &Env) -> Vec<super::Agent> {
+/// Return the [`crate::Agent`]s whose CLI binaries are installed on the system.
+pub fn installed_agents(env: &Env) -> Vec<crate::Agent> {
     scan_installed(env)
         .into_iter()
         .map(|a| a.kind.to_skill_agent())
@@ -772,5 +772,282 @@ agent-skills [Enabled]
             AgentKind::from_model_hint("anthropic/claude-3-5-haiku"),
             Some(AgentKind::Opencode)
         );
+    }
+}
+
+#[cfg(test)]
+mod adapter_parse_tests {
+    use super::*;
+
+    #[test]
+    fn gemini_parses_bracketed_names_only_sorted_deduped() {
+        let got = GeminiStrategy.parse_listed_skills(
+            "pdf-tools [PDF helper]\nnoise line\n git-readme [readme] \ntwo words [x]\npdf-tools [dup]\n",
+        );
+        // `two words` has a space (rejected); the duplicate collapses; result is sorted.
+        assert_eq!(got, vec!["git-readme".to_string(), "pdf-tools".to_string()]);
+    }
+
+    #[test]
+    fn opencode_parses_json_array_names_skipping_empty() {
+        let got = OpencodeStrategy.parse_listed_skills(
+            "debug noise [{\"name\":\"beta\"},{\"name\":\"\"},{\"name\":\"alpha\"},{\"other\":1}]",
+        );
+        assert_eq!(got, vec!["alpha".to_string(), "beta".to_string()]);
+    }
+
+    #[test]
+    fn opencode_tolerates_non_json_stdout() {
+        assert!(
+            OpencodeStrategy
+                .parse_listed_skills("no skills here")
+                .is_empty()
+        );
+    }
+}
+
+#[cfg(test)]
+mod strategy_and_exec_tests {
+    use super::*;
+    use std::env;
+    use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
+    /// Write an executable shell script with the given body and return its path.
+    fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
+        fs::create_dir_all(dir).unwrap();
+        let p = dir.join(name);
+        fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+        #[cfg(unix)]
+        {
+            let mut perms = fs::metadata(&p).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&p, perms).unwrap();
+        }
+        p
+    }
+
+    fn tmp(tag: &str) -> PathBuf {
+        let d = env::temp_dir().join(format!("the-installed-ex-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn from_model_hint_returns_none_for_unknown() {
+        assert_eq!(AgentKind::from_model_hint("mystery-model"), None);
+        assert_eq!(AgentKind::from_model_hint(""), None);
+        assert_eq!(AgentKind::from_model_hint("flash"), Some(AgentKind::Gemini));
+        assert_eq!(
+            AgentKind::from_model_hint("claude-opus"),
+            Some(AgentKind::Claude)
+        );
+    }
+
+    #[test]
+    fn command_output_succeeded_requires_zero_status_and_no_quota() {
+        let ok = CommandOutput {
+            status: 0,
+            stdout: "x".into(),
+            stderr: String::new(),
+            quota_limit: None,
+        };
+        assert!(ok.succeeded());
+        let nonzero = CommandOutput {
+            status: 1,
+            ..ok.clone()
+        };
+        assert!(!nonzero.succeeded());
+        let limited = CommandOutput {
+            quota_limit: Some(QuotaLimit {
+                message: "hit limit".into(),
+                reset: None,
+            }),
+            ..ok
+        };
+        assert!(!limited.succeeded());
+    }
+
+    #[test]
+    fn command_spec_builders_capture_env_and_cwd() {
+        let spec = CommandSpec::new("/bin/echo")
+            .arg("a")
+            .args(["b", "c"])
+            .cwd("/tmp/wd")
+            .env("K", "V")
+            .env_remove("DROP");
+        assert_eq!(spec.args, vec!["a", "b", "c"]);
+        assert_eq!(spec.cwd.as_deref(), Some(Path::new("/tmp/wd")));
+        assert_eq!(spec.env_set, vec![("K".to_owned(), "V".to_owned())]);
+        assert_eq!(spec.env_remove, vec!["DROP".to_owned()]);
+    }
+
+    #[test]
+    fn run_captures_stdout_stderr_and_cwd_and_env() {
+        let dir = tmp("run");
+        // Echoes an env var we set, the cwd, and writes a line to stderr too.
+        let exe = script(&dir, "probe", "echo \"out $MARKER $(pwd)\"\necho warn 1>&2");
+        let wd = dir.join("workdir");
+        fs::create_dir_all(&wd).unwrap();
+        let out = CommandSpec::new(&exe)
+            .env("MARKER", "hello")
+            .cwd(&wd)
+            .run()
+            .expect("run");
+        assert_eq!(out.status, 0);
+        assert!(out.stdout.contains("out hello"), "stdout: {}", out.stdout);
+        assert!(
+            out.stdout.contains("workdir"),
+            "cwd not applied: {}",
+            out.stdout
+        );
+        assert!(out.stderr.contains("warn"));
+        assert!(out.succeeded());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_flags_quota_limit_from_combined_output() {
+        let dir = tmp("quota");
+        let exe = script(
+            &dir,
+            "limited",
+            "echo 'You have hit your 5-hour limit' 1>&2; exit 1",
+        );
+        let out = CommandSpec::new(&exe).run().expect("run");
+        assert_eq!(out.status, 1);
+        assert!(out.quota_limit.is_some());
+        assert!(!out.succeeded());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn probe_version_reads_first_line() {
+        let dir = tmp("ver");
+        let exe = script(&dir, "claude", "echo '1.2.3 (build 9)'\necho extra");
+        let agent = InstalledAgent::new(AgentKind::Claude, exe);
+        assert_eq!(agent.probe_version().as_deref(), Some("1.2.3 (build 9)"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn probe_version_is_none_on_failure() {
+        let dir = tmp("ver-fail");
+        let exe = script(&dir, "gemini", "exit 3");
+        let agent = InstalledAgent::new(AgentKind::Gemini, exe);
+        assert_eq!(agent.probe_version(), None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn every_strategy_reports_its_own_kind() {
+        for k in AgentKind::ALL {
+            assert_eq!(k.strategy().kind(), k);
+        }
+    }
+
+    #[test]
+    fn home_fallbacks_are_under_home_for_each_agent() {
+        let home = Path::new("/home/u");
+        for k in AgentKind::ALL {
+            for p in k.strategy().home_fallbacks(home) {
+                assert!(p.starts_with(home), "{k:?} fallback {p:?} not under home");
+                assert!(p.ends_with(k.binary_name()), "{k:?} fallback {p:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn gemini_version_cmd_isolates_cli_home() {
+        let g = GeminiStrategy.version_cmd(Path::new("/opt/gemini"));
+        assert_eq!(g.args, vec!["--version"]);
+        assert!(g.env_set.iter().any(|(k, _)| k == "GEMINI_CLI_HOME"));
+    }
+
+    #[test]
+    fn default_version_cmd_is_bare_version_flag() {
+        let c = ClaudeStrategy.version_cmd(Path::new("/usr/bin/claude"));
+        assert_eq!(c.args, vec!["--version"]);
+        assert!(c.env_set.is_empty());
+    }
+
+    #[test]
+    fn gemini_prompt_maps_flash_lite_and_passthrough_and_default() {
+        let bin = Path::new("/opt/gemini");
+        let lite = GeminiStrategy.prompt_cmd(bin, &PromptRequest::new("p").model("flash-lite"));
+        assert_eq!(
+            lite.args,
+            vec!["--skip-trust", "-m", "gemini-2.5-flash-lite", "-p", "p"]
+        );
+        let passthrough =
+            GeminiStrategy.prompt_cmd(bin, &PromptRequest::new("p").model("gemini-x"));
+        assert!(passthrough.args.contains(&"gemini-x".to_owned()));
+        let defaulted = GeminiStrategy.prompt_cmd(bin, &PromptRequest::new("p"));
+        assert!(defaulted.args.contains(&"gemini-2.5-flash-lite".to_owned()));
+    }
+
+    #[test]
+    fn opencode_prompt_omits_model_flag_when_absent() {
+        let oc = OpencodeStrategy.prompt_cmd(Path::new("/opt/opencode"), &PromptRequest::new("hi"));
+        assert_eq!(oc.args, vec!["run", "hi"]);
+    }
+
+    #[test]
+    fn goose_strategy_has_no_list_and_builds_run_text_prompt() {
+        assert_eq!(GooseStrategy.default_model(), None);
+        assert!(
+            GooseStrategy
+                .list_skills_cmd(Path::new("/g"), Path::new("."))
+                .is_none()
+        );
+        assert!(GooseStrategy.parse_listed_skills("anything").is_empty());
+        let wd = Path::new("/tmp/g");
+        let cmd = GooseStrategy.prompt_cmd(Path::new("/g"), &PromptRequest::new("ask").cwd(wd));
+        assert_eq!(cmd.args, vec!["run", "--text", "ask"]);
+        assert_eq!(cmd.cwd.as_deref(), Some(wd));
+        let goose = InstalledAgent::new(AgentKind::Goose, PathBuf::from("/g"));
+        assert!(!goose.supports_zero_api_list);
+        assert_eq!(goose.kind.to_skill_agent(), crate::Agent::Goose);
+    }
+
+    #[test]
+    fn is_executable_file_rejects_directories_and_missing() {
+        let dir = tmp("exe-check");
+        assert!(!is_executable_file(&dir)); // a directory is not an executable file
+        assert!(!is_executable_file(&dir.join("nope")));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn claude_and_goose_list_nothing() {
+        assert!(ClaudeStrategy.parse_listed_skills("marker [x]").is_empty());
+        assert!(GooseStrategy.parse_listed_skills("anything [y]").is_empty());
+    }
+
+    #[test]
+    fn opencode_prompt_applies_cwd() {
+        let wd = Path::new("/tmp/ocwd");
+        let cmd = OpencodeStrategy.prompt_cmd(
+            Path::new("/opt/opencode"),
+            &PromptRequest::new("go").cwd(wd),
+        );
+        assert_eq!(cmd.cwd.as_deref(), Some(wd));
+    }
+
+    #[test]
+    fn find_installed_returns_none_when_absent_everywhere() {
+        let empty = tmp("empty");
+        let mut vars = std::collections::HashMap::new();
+        vars.insert("PATH".to_owned(), empty.to_string_lossy().into_owned());
+        let env = crate::locate::Env {
+            cwd: empty.clone(),
+            home: Some(empty.clone()),
+            os: "linux",
+            vars,
+        };
+        assert!(find_installed(&env, AgentKind::Goose).is_none());
+        let _ = fs::remove_dir_all(&empty);
     }
 }

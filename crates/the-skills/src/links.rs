@@ -9,7 +9,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use super::parse::{Parsed, Problem};
+use crate::parse::{Parsed, Problem};
 
 const EXTERNAL_SCHEMES: &[&str] = &[
     "http://",
@@ -373,7 +373,7 @@ fn resolve_within(skill_dir: &Path, rel: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::skills::parse::parse;
+    use crate::parse::parse;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct TempSkill {

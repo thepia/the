@@ -12,8 +12,8 @@
 
 use std::path::PathBuf;
 
-use super::parse::{Problem, name_format_ok};
-use super::resolve::{Skill, Status};
+use crate::parse::{Problem, name_format_ok};
+use crate::resolve::{Skill, Status};
 
 /// How safely an issue can be repaired.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

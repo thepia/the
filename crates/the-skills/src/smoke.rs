@@ -13,8 +13,8 @@
 use std::fs;
 use std::path::Path;
 
-use super::SKILL_FILE;
-use super::parse::{Parsed, Problem, allowed_tools};
+use crate::SKILL_FILE;
+use crate::parse::{Parsed, Problem, allowed_tools};
 
 const SECRET_PREFIXES: &[&str] = &[
     "sk-ant-api03-",
@@ -302,7 +302,7 @@ fn is_unrestricted_bash(grant: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::skills::parse::parse;
+    use crate::parse::parse;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
 

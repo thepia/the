@@ -6,6 +6,7 @@ use std::process::ExitCode;
 
 use serde_json::{Value, json};
 
+use super::analysis::corpus_findings;
 use super::fix::{self, Advice, FixClass};
 use super::installed::installed_agents;
 use super::locate::{Env, plan, plan_for};
@@ -39,7 +40,7 @@ pub fn run(args: SkillsArgs, format: Format, h: Human) -> Result<ExitCode, Diagn
             search,
             all,
             advice,
-        }) => lint(name.as_deref(), &search, all, advice, format, h),
+        }) => lint(name.as_deref(), &search, all, advice, args.beta, format, h),
         None => {
             let form = if args.by_scope {
                 ListForm::ByScope
@@ -436,32 +437,8 @@ fn format_skill_paragraph(skills: &[&Skill], h: Human) -> String {
 }
 
 fn issue_label(code: &str) -> &'static str {
-    match code {
-        "no-frontmatter" => "missing YAML frontmatter",
-        "frontmatter-unterminated" => "unterminated YAML frontmatter",
-        "frontmatter-invalid" => "invalid YAML frontmatter",
-        "name-missing" => "missing skill name",
-        "name-has-slash" => "skill name contains '/'",
-        "description-not-string" => "non-string description",
-        "symlink-escape" => "symlink escapes skill directory",
-        "trojan-source" => "hidden control or bidirectional character",
-        "exposed-secret" => "exposed secret or credential literal",
-        "skill-conflict" => "duplicate skill name conflict",
-        "broken-link" => "broken relative link in SKILL.md",
-        "link-escapes-skill" => "relative link escapes skill directory",
-        "broken-symlink" => "dangling symlink in skill directory",
-        "unrestricted-bash" => "unrestricted Bash tool permission",
-        "name-format" => "invalid skill name format",
-        "name-mismatch" => "skill name differs from directory",
-        "description-missing" => "missing description",
-        "description-too-long" => "description exceeds 1024 characters",
-        "compatibility-invalid" => "invalid or overlong compatibility field",
-        "license-not-string" => "non-string license field",
-        "metadata-not-map" => "metadata is not a flat scalar map",
-        "allowed-tools-invalid" => "invalid allowed-tools field",
-        "unknown-frontmatter-key" => "unknown frontmatter key",
-        _ => "skill format issue",
-    }
+    // Single source of truth: the rule registry (the-skills `rules`).
+    super::rules::label(code)
 }
 
 /// Build a concise summary of totals and issue counts across `skills` for prose output.
@@ -854,6 +831,7 @@ fn lint(
     search: &SearchArgs,
     all: bool,
     advice: bool,
+    beta: bool,
     format: Format,
     h: Human,
 ) -> Result<ExitCode, Diagnostic> {
@@ -891,7 +869,22 @@ fn lint(
             .emit(format);
     }
 
-    let diags = collect_diagnostics(&skills);
+    let mut diags = collect_diagnostics(&skills);
+    // Corpus-level beta rules (`redundant-with`, `superseded-by`): computed always so a graduated rule
+    // works by default, then gated on each rule's `stability` in the registry — shown only with
+    // `--beta` while still staged. Graduation is flipping one field in `the-skills::rules`.
+    for (skill_name, path, p) in corpus_findings(&skills) {
+        diags.push(
+            Diagnostic::warning(
+                p.code,
+                format!("skill `{skill_name}`: {}", issue_label(p.code)),
+            )
+            .context(path.display().to_string())
+            .cause(p.message)
+            .help(p.fix),
+        );
+    }
+    diags.retain(|d| beta || !super::rules::is_beta(d.code));
 
     // Result first: print the table on stdout so a reader sees the overview before the issues.
     // `--advice` adds a fix-advice table (also a stdout result: it is the requested fix plan, per
