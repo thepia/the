@@ -447,7 +447,7 @@ fn show_unknown_skill_exits_not_found_with_a_suggestion() {
         err.starts_with("error[skill-not-found]: no skill named `pdf`\n"),
         "{err}"
     );
-    assert!(err.contains("= help: did you mean `pdf-tools`?"), "{err}");
+    assert!(err.contains("help: did you mean `pdf-tools`?"), "{err}");
 }
 
 #[test]

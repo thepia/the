@@ -111,16 +111,19 @@ impl Diagnostic {
                     term.paint(style::HEAD, &self.title)
                 );
                 for c in &self.context {
-                    s.push_str(&format!("  {} {c}\n", term.paint(style::DIM, "-->")));
-                }
-                if let Some(cause) = &self.cause {
+                    // A document glyph pointing at the source location. The value is the offending
+                    // file (callers append `:line` / `:line:col` where known), so it renders as a
+                    // clickable `path:line:col` an editor opens with the cursor there.
                     s.push_str(&format!(
-                        "  {} {cause}\n",
-                        term.paint(style::DIM, "= cause:")
+                        "  {} {c}\n",
+                        term.paint(style::DIM, style::GLYPH_FILE)
                     ));
                 }
+                if let Some(cause) = &self.cause {
+                    s.push_str(&format!("  {} {cause}\n", term.paint(style::DIM, "cause:")));
+                }
                 if let Some(help) = &self.help {
-                    s.push_str(&format!("  {} {help}\n", term.paint(style::DIM, "= help:")));
+                    s.push_str(&format!("  {} {help}\n", term.paint(style::DIM, "help:")));
                 }
                 s
             }
@@ -269,7 +272,7 @@ mod tests {
 
     fn sample() -> Diagnostic {
         Diagnostic::error("skill-not-found", "no skill named `x`")
-            .context("/home/u/.claude/skills")
+            .context("/home/u/.claude/skills/pdf/SKILL.md:12:5")
             .cause("searched 1 directory")
             .help("run `the skills list`")
             .exit(Exit::NotFound)
@@ -282,7 +285,7 @@ mod tests {
 
     #[test]
     fn human_render_is_rustc_shaped() {
-        let plain = "error[skill-not-found]: no skill named `x`\n  --> /home/u/.claude/skills\n  = cause: searched 1 directory\n  = help: run `the skills list`\n";
+        let plain = "error[skill-not-found]: no skill named `x`\n  \u{1F4C4} /home/u/.claude/skills/pdf/SKILL.md:12:5\n  cause: searched 1 directory\n  help: run `the skills list`\n";
         assert_eq!(sample().render(Format::Human, Term::PLAIN), plain);
         let colored = sample().render(Format::Human, COLOR);
         assert!(colored.starts_with(&style::paint(
@@ -290,7 +293,10 @@ mod tests {
             style::FAIL.bold(),
             "error[skill-not-found]"
         )));
-        assert!(colored.contains(&style::paint(true, style::DIM, "= help:")));
+        assert!(colored.contains(&style::paint(true, style::DIM, "help:")));
+        // Context renders as a document glyph pointing at the file location (with any `:line:col`).
+        assert!(colored.contains(&style::paint(true, style::DIM, style::GLYPH_FILE)));
+        assert!(colored.contains("/home/u/.claude/skills/pdf/SKILL.md:12:5"));
     }
 
     #[test]

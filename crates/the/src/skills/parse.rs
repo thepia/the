@@ -74,6 +74,14 @@ pub struct Problem {
     pub message: String,
     /// How to fix it.
     pub fix: &'static str,
+    /// The 1-based SKILL.md line this problem points at, when it has a source location (link, asset,
+    /// and security-smoke findings). Rendered as `SKILL.md:line` in a diagnostic and carried in JSON.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<usize>,
+    /// The 1-based column on `line` where the problem begins, when precisely known (so an editor opens
+    /// with the cursor there). Rendered as `SKILL.md:line:col`. Only set with `line`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub col: Option<usize>,
 }
 
 impl Problem {
@@ -136,7 +144,23 @@ impl Problem {
             code,
             message: message.into(),
             fix,
+            line: None,
+            col: None,
         }
+    }
+
+    /// Attach the 1-based SKILL.md line this problem points at (link / asset / security findings with
+    /// a source location), so a diagnostic can render a clickable `SKILL.md:line`.
+    pub fn at_line(mut self, line: usize) -> Self {
+        self.line = Some(line);
+        self
+    }
+
+    /// Attach the 1-based column where the problem begins, so an editor opens with the cursor there
+    /// (`SKILL.md:line:col`). Only meaningful together with [`Self::at_line`].
+    pub fn at_column(mut self, col: usize) -> Self {
+        self.col = Some(col);
+        self
     }
 
     pub fn kind(&self) -> ProblemKind {

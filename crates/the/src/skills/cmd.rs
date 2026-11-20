@@ -264,11 +264,16 @@ fn collect_diagnostics(skills: &[&Skill]) -> Vec<Diagnostic> {
             } else {
                 Diagnostic::warning(p.code, title)
             };
-            out.push(
-                d.context(s.path.display().to_string())
-                    .cause(p.message.clone())
-                    .help(p.fix),
-            );
+            // Point at the exact SKILL.md location when the problem has one (links, assets,
+            // security), so the context is a clickable `path:line` (or `path:line:col` when the
+            // column is precisely known), which an editor opens with the cursor there.
+            let path = s.path.display();
+            let location = match (p.line, p.col) {
+                (Some(line), Some(col)) => format!("{path}:{line}:{col}"),
+                (Some(line), None) => format!("{path}:{line}"),
+                _ => path.to_string(),
+            };
+            out.push(d.context(location).cause(p.message.clone()).help(p.fix));
         }
 
         let spec_lint: Vec<&Problem> = s
