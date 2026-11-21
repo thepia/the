@@ -82,6 +82,19 @@ pub fn check_body_links(body: &str, body_start_line: usize, skill_dir: &Path) ->
             // offset equals the raw line's, and the editor opens the cursor on the link.
             let col = prose[..link_start].chars().count() + 1;
             let rel_path = Path::new(clean_path);
+            if rel_path.is_absolute() || clean_path.starts_with("~/") {
+                out.push(
+                    Problem::new(
+                        "non-portable-path",
+                        format!(
+                            "link `{raw_target}` at SKILL.md line {line_num} is an absolute path; it will not resolve on another machine"
+                        ),
+                    )
+                    .at_line(line_num)
+                    .at_column(col),
+                );
+                continue;
+            }
             let Some(lexical_target) = resolve_within(&canonical_skill_dir, rel_path) else {
                 out.push(
                     Problem::new(
@@ -435,6 +448,23 @@ mod tests {
             "{codes:?}"
         );
         assert_eq!(codes[2].0, "link-escapes-skill", "{codes:?}");
+    }
+
+    #[test]
+    fn absolute_path_links_are_non_portable() {
+        let sk = TempSkill::new();
+        let body = "\
+[home](/Users/me/notes/guide.md) and [tilde](~/notes/guide.md) and [rel](references/x.md)
+";
+        let codes: Vec<&str> = check_body_links(body, 1, &sk.dir)
+            .iter()
+            .map(|p| p.code)
+            .collect();
+        // The two absolute targets are non-portable; the relative one is just a broken link.
+        assert_eq!(
+            codes,
+            ["non-portable-path", "non-portable-path", "broken-link"]
+        );
     }
 
     #[test]

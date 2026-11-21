@@ -427,6 +427,31 @@ fn description_word_count(desc: &str) -> usize {
         .count()
 }
 
+/// Meaningful tokens of a string: lowercase alphanumeric runs of at least two characters, splitting on
+/// anything else (so `pdf-tools` -> {pdf, tools}). Drives `description-echoes-name`.
+fn meaningful_tokens(s: &str) -> std::collections::BTreeSet<String> {
+    s.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.chars().count() >= 2)
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// The first placeholder / template marker found in a skill body, if any: an unambiguous sign the
+/// skill was left unfinished. Deliberately conservative (no bare `TODO`/`FIXME`, which legitimately
+/// appear in skills about task tracking, and no `{{` which appears in templating skills).
+fn unfinished_marker(body: &str) -> Option<&'static str> {
+    const MARKERS: &[&str] = &[
+        "lorem ipsum",
+        "<placeholder",
+        "replace_me",
+        "replace_this",
+        "your-name-here",
+        "your name here",
+    ];
+    let lower = body.to_lowercase();
+    MARKERS.iter().copied().find(|m| lower.contains(m))
+}
+
 /// Advisory Agent Skills format checks; only run on frontmatter that parsed.
 pub fn lint(p: &Parsed, dir_name: &str) -> Vec<Problem> {
     let mut out = Vec::new();
@@ -544,6 +569,28 @@ pub fn lint(p: &Parsed, dir_name: &str) -> Vec<Problem> {
         out.push(Problem::new(
             "unknown-frontmatter-key",
             format!("unknown frontmatter key `{k}`"),
+        ));
+    }
+    // A description whose meaningful words are all already in the name adds no routing information.
+    if let (Some(name), Some(desc)) = (
+        p.str_field("name").filter(|n| !n.is_empty()),
+        p.str_field("description")
+            .map(str::trim)
+            .filter(|d| !d.is_empty()),
+    ) {
+        let desc_tokens = meaningful_tokens(desc);
+        if !desc_tokens.is_empty() && desc_tokens.is_subset(&meaningful_tokens(name)) {
+            out.push(Problem::new(
+                "description-echoes-name",
+                "`description` only repeats the skill name; it adds no routing information",
+            ));
+        }
+    }
+    // Placeholder / template markers left in the body: the skill looks unfinished.
+    if let Some(marker) = unfinished_marker(&p.body) {
+        out.push(Problem::new(
+            "unfinished-skill",
+            format!("body contains the placeholder `{marker}`; the skill looks unfinished"),
         ));
     }
     out
@@ -952,6 +999,46 @@ metadata:
         // Long low-variety descriptions are not "terse" (the char guard): clean here.
         let long_one_word = format!("---\nname: a\ndescription: {}\n---\n", "x".repeat(50));
         assert!(l(&long_one_word, "a").is_empty());
+    }
+
+    #[test]
+    fn description_echoing_the_name_is_flagged() {
+        let l = |s: &str, dir: &str| codes(&lint(&parse(s), dir));
+        // Description only restates the name (3 words, so not also terse) -> flagged.
+        assert_eq!(
+            l(
+                "---\nname: pdf-document-tools\ndescription: PDF document tools\n---\n",
+                "pdf-document-tools"
+            ),
+            ["description-echoes-name"]
+        );
+        // Adds information beyond the name -> clean.
+        assert!(
+            l(
+                "---\nname: pdf-tools\ndescription: Fill and merge PDF forms\n---\n",
+                "pdf-tools"
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn placeholder_body_markers_flag_an_unfinished_skill() {
+        let terse = codes(&lint(
+            &parse(
+                "---\nname: a\ndescription: a clear useful tool\n---\n\nTODO: lorem ipsum dolor.\n",
+            ),
+            "a",
+        ));
+        assert_eq!(terse, ["unfinished-skill"]);
+        // A skill whose body merely mentions tasks is not flagged (no template marker).
+        assert!(
+            codes(&lint(
+                &parse("---\nname: a\ndescription: a clear useful tool\n---\n\nManage your TODO list.\n"),
+                "a",
+            ))
+            .is_empty()
+        );
     }
 
     #[test]
