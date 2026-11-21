@@ -154,12 +154,12 @@ fn list_shows_which_agents_load_each_skill() {
     );
     sb.skill(
         &sb.home().join(".config/goose/skills/recipes"),
-        &md("recipes", "Goose recipes."),
+        &md("recipes", "Goose recipe collection."),
     );
     // Nested below a skills dir: OpenCode and Goose scan recursively, Claude Code one level only.
     sb.skill(
         &sb.home().join(".claude/skills/group/nested"),
-        &md("nested", "Nested."),
+        &md("nested", "A nested example skill."),
     );
 
     let o = sb.run(&["skills", "list"]);
@@ -169,9 +169,9 @@ fn list_shows_which_agents_load_each_skill() {
         "\
 NAME       SCOPE    AGENTS                   LINKED  DESCRIPTION
 deploy     project  opencode, goose          no      Deploy this repo.
-nested     user     opencode, goose          no      Nested.
+nested     user     opencode, goose          no      A nested example skill.
 pdf-tools  user     claude, opencode, goose  no      Work with PDFs.
-recipes    user     goose                    no      Goose recipes.
+recipes    user     goose                    no      Goose recipe collection.
 "
     );
     assert_eq!(stderr(&o), "");
@@ -650,12 +650,12 @@ fn list_only_considers_installed_assistants_in_agents_column() {
     );
     sb.skill(
         &sb.work().join(".gemini/skills/gem-only"),
-        &md("gem-only", "Gemini skill."),
+        &md("gem-only", "A Gemini example skill."),
     );
     // Goose-only directory should not be searched when goose is not installed.
     sb.skill(
         &sb.home().join(".config/goose/skills/recipes"),
-        &md("recipes", "Goose recipes."),
+        &md("recipes", "Goose recipe collection."),
     );
 
     let o = sb.run(&["skills", "list"]);
@@ -665,7 +665,7 @@ fn list_only_considers_installed_assistants_in_agents_column() {
         "\
 NAME       SCOPE    AGENTS  LINKED  DESCRIPTION
 deploy     project  gemini  no      Deploy this repo.
-gem-only   project  gemini  no      Gemini skill.
+gem-only   project  gemini  no      A Gemini example skill.
 pdf-tools  user     claude  no      Work with PDFs.
 "
     );
@@ -685,7 +685,7 @@ fn list_prose_form_renders_paragraph_of_skill_names() {
     );
     sb.skill(
         &sb.home().join(".config/goose/skills/recipes"),
-        &md("recipes", "Goose recipes."),
+        &md("recipes", "Goose recipe collection."),
     );
 
     // `the skills` (no subcommand) outputs the assistants found and the paragraph of all skills.
@@ -733,7 +733,7 @@ fn prose_highlights_issues_with_bang_and_summarizes_counts_without_stderr_noise(
     let sb = Sandbox::new();
     sb.skill(
         &sb.home().join(".claude/skills/clean"),
-        &md("clean", "Clean skill."),
+        &md("clean", "A clean example skill."),
     );
     sb.skill(
         &sb.home().join(".claude/skills/bad-yaml"),

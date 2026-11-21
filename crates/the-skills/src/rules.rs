@@ -125,6 +125,14 @@ pub const RULES: &[Rule] = &[
         stability: Default,
     },
     Rule {
+        code: "description-too-terse",
+        label: "description too terse for discovery",
+        fix: "expand `description` to say what the skill does and when to use it, not a bare noun phrase",
+        kind: Spec,
+        severity: Note,
+        stability: Default,
+    },
+    Rule {
         code: "compatibility-invalid",
         label: "invalid or overlong compatibility field",
         fix: "set `compatibility:` to a non-empty string of 500 characters or fewer",

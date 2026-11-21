@@ -19,6 +19,14 @@ use crate::Agent;
 const NAME_MAX: usize = 64;
 const DESCRIPTION_MAX: usize = 1024;
 const COMPATIBILITY_MAX: usize = 500;
+/// A present description is too terse when it is BOTH short (fewer than `DESCRIPTION_TERSE_MAX` chars)
+/// and sparse (fewer than `DESCRIPTION_MIN_WORDS` meaningful words): a bare noun phrase like "PDF tools"
+/// an agent cannot route on. A `note`, not an error (it still loads). Both conditions are required so a
+/// minimal-but-real description ("Work with PDF files") and an oddly long low-variety one are not
+/// flagged. Motivated by SkillMD SK010 and the skill-quality correlation study (description budget is
+/// the top adoption signal).
+const DESCRIPTION_MIN_WORDS: usize = 3;
+const DESCRIPTION_TERSE_MAX: usize = 40;
 
 /// Portable top-level keys defined by the Agent Skills (agentskills.io) specification.
 const SPEC_KEYS: &[&str] = &[
@@ -411,6 +419,14 @@ pub fn name_format_ok(name: &str) -> bool {
         && !name.contains("--")
 }
 
+/// Count of meaningful words in a description: whitespace tokens that carry a letter or digit and are
+/// at least two characters. Drives the `description-too-terse` discovery-quality lint.
+fn description_word_count(desc: &str) -> usize {
+    desc.split_whitespace()
+        .filter(|w| w.chars().count() >= 2 && w.chars().any(char::is_alphanumeric))
+        .count()
+}
+
 /// Advisory Agent Skills format checks; only run on frontmatter that parsed.
 pub fn lint(p: &Parsed, dir_name: &str) -> Vec<Problem> {
     let mut out = Vec::new();
@@ -450,6 +466,18 @@ pub fn lint(p: &Parsed, dir_name: &str) -> Vec<Problem> {
                 d.chars().count()
             ),
         )),
+        Some(d)
+            if d.chars().count() < DESCRIPTION_TERSE_MAX
+                && description_word_count(d) < DESCRIPTION_MIN_WORDS =>
+        {
+            out.push(Problem::new(
+                "description-too-terse",
+                format!(
+                    "`description` has {} meaningful words; too terse for an agent to route on, say what the skill does and when to use it",
+                    description_word_count(d)
+                ),
+            ));
+        }
         Some(_) => {}
     }
     if let Some(v) = p.frontmatter.get("license")
@@ -705,15 +733,21 @@ mod tests {
         let l = |s: &str, dir: &str| codes(&lint(&parse(s), dir));
         assert!(l(GOOD, "pdf-tools").is_empty());
         assert_eq!(
-            l("---\nname: PDF\ndescription: x\n---\n", "PDF"),
+            l(
+                "---\nname: PDF\ndescription: a clear useful tool\n---\n",
+                "PDF"
+            ),
             ["name-format"]
         );
         assert_eq!(
-            l("---\nname: a--b\ndescription: x\n---\n", "a--b"),
+            l(
+                "---\nname: a--b\ndescription: a clear useful tool\n---\n",
+                "a--b"
+            ),
             ["name-format"]
         );
         assert_eq!(
-            l("---\nname: a\ndescription: x\n---\n", "b"),
+            l("---\nname: a\ndescription: a clear useful tool\n---\n", "b"),
             ["name-mismatch"]
         );
         assert_eq!(l("---\nname: a\n---\n", "a"), ["description-missing"]);
@@ -736,7 +770,7 @@ mod tests {
         let extensions = "\
 ---
 name: a
-description: Desc
+description: a clear useful tool
 license: MIT
 compatibility: Requires git and python3
 allowed-tools: Read Grep Glob
@@ -759,7 +793,7 @@ metadata:
         // Array of strings in allowed-tools is also accepted.
         assert!(
             l(
-                "---\nname: a\ndescription: x\nallowed-tools:\n  - Read\n  - Write\n---\n",
+                "---\nname: a\ndescription: a clear useful tool\nallowed-tools:\n  - Read\n  - Write\n---\n",
                 "a"
             )
             .is_empty()
@@ -768,45 +802,51 @@ metadata:
         // Invalid compatibility: empty, non-string, or > 500 chars.
         assert_eq!(
             l(
-                "---\nname: a\ndescription: x\ncompatibility: \"   \"\n---\n",
+                "---\nname: a\ndescription: a clear useful tool\ncompatibility: \"   \"\n---\n",
                 "a"
             ),
             ["compatibility-invalid"]
         );
         assert_eq!(
             l(
-                "---\nname: a\ndescription: x\ncompatibility: 123\n---\n",
+                "---\nname: a\ndescription: a clear useful tool\ncompatibility: 123\n---\n",
                 "a"
             ),
             ["compatibility-invalid"]
         );
         let long_compat = format!(
-            "---\nname: a\ndescription: x\ncompatibility: {}\n---\n",
+            "---\nname: a\ndescription: a clear useful tool\ncompatibility: {}\n---\n",
             "c".repeat(COMPATIBILITY_MAX + 1)
         );
         assert_eq!(l(&long_compat, "a"), ["compatibility-invalid"]);
 
         // Invalid license: non-string.
         assert_eq!(
-            l("---\nname: a\ndescription: x\nlicense: 42\n---\n", "a"),
+            l(
+                "---\nname: a\ndescription: a clear useful tool\nlicense: 42\n---\n",
+                "a"
+            ),
             ["license-not-string"]
         );
 
         // Invalid metadata: non-mapping or nested array/object values.
         assert_eq!(
-            l("---\nname: a\ndescription: x\nmetadata: plain\n---\n", "a"),
-            ["metadata-not-map"]
-        );
-        assert_eq!(
             l(
-                "---\nname: a\ndescription: x\nmetadata:\n  nested:\n    k: v\n---\n",
+                "---\nname: a\ndescription: a clear useful tool\nmetadata: plain\n---\n",
                 "a"
             ),
             ["metadata-not-map"]
         );
         assert_eq!(
             l(
-                "---\nname: a\ndescription: x\nmetadata:\n  list:\n    - item\n---\n",
+                "---\nname: a\ndescription: a clear useful tool\nmetadata:\n  nested:\n    k: v\n---\n",
+                "a"
+            ),
+            ["metadata-not-map"]
+        );
+        assert_eq!(
+            l(
+                "---\nname: a\ndescription: a clear useful tool\nmetadata:\n  list:\n    - item\n---\n",
                 "a"
             ),
             ["metadata-not-map"]
@@ -815,14 +855,14 @@ metadata:
         // Invalid allowed-tools: non-string / non-string-array.
         assert_eq!(
             l(
-                "---\nname: a\ndescription: x\nallowed-tools: 99\n---\n",
+                "---\nname: a\ndescription: a clear useful tool\nallowed-tools: 99\n---\n",
                 "a"
             ),
             ["allowed-tools-invalid"]
         );
         assert_eq!(
             l(
-                "---\nname: a\ndescription: x\nallowed-tools:\n  - 99\n---\n",
+                "---\nname: a\ndescription: a clear useful tool\nallowed-tools:\n  - 99\n---\n",
                 "a"
             ),
             ["allowed-tools-invalid"]
@@ -830,7 +870,10 @@ metadata:
 
         // Unknown top-level frontmatter key.
         assert_eq!(
-            l("---\nname: a\ndescription: x\ncustom-key: val\n---\n", "a"),
+            l(
+                "---\nname: a\ndescription: a clear useful tool\ncustom-key: val\n---\n",
+                "a"
+            ),
             ["unknown-frontmatter-key"]
         );
     }
@@ -844,14 +887,21 @@ metadata:
         let l = |s: &str, dir: &str| codes(&lint(&parse(s), dir));
         for name in ["a", "3d-tools", "1", "a1", &"a".repeat(NAME_MAX)] {
             assert!(
-                l(&format!("---\nname: {name}\ndescription: x\n---\n"), name).is_empty(),
+                l(
+                    &format!("---\nname: {name}\ndescription: a clear useful tool\n---\n"),
+                    name
+                )
+                .is_empty(),
                 "name `{name}` must be accepted"
             );
         }
         // And fires on the real violations.
         for name in ["-a", "a-", "a b", "A", &"a".repeat(NAME_MAX + 1)] {
             assert_eq!(
-                l(&format!("---\nname: {name}\ndescription: x\n---\n"), name),
+                l(
+                    &format!("---\nname: {name}\ndescription: a clear useful tool\n---\n"),
+                    name
+                ),
                 ["name-format"],
                 "name `{name}` must be rejected"
             );
@@ -884,6 +934,27 @@ metadata:
     }
 
     #[test]
+    fn terse_description_is_flagged_but_minimal_real_ones_pass() {
+        let l = |s: &str, dir: &str| codes(&lint(&parse(s), dir));
+        // Bare noun phrase: short + sparse -> flagged.
+        assert_eq!(
+            l("---\nname: a\ndescription: PDF tools\n---\n", "a"),
+            ["description-too-terse"]
+        );
+        assert_eq!(
+            l("---\nname: a\ndescription: database\n---\n", "a"),
+            ["description-too-terse"]
+        );
+        // A minimal-but-real description (>=3 meaningful words) is clean.
+        assert!(l("---\nname: a\ndescription: Work with PDF files\n---\n", "a").is_empty());
+        // Short but 3 words (the canonical GOOD description) is clean.
+        assert!(l("---\nname: a\ndescription: Work with PDFs.\n---\n", "a").is_empty());
+        // Long low-variety descriptions are not "terse" (the char guard): clean here.
+        let long_one_word = format!("---\nname: a\ndescription: {}\n---\n", "x".repeat(50));
+        assert!(l(&long_one_word, "a").is_empty());
+    }
+
+    #[test]
     fn whitespace_only_description_is_missing() {
         // skill-check `description.non_empty`: whitespace-only counts as empty.
         let l = |s: &str, dir: &str| codes(&lint(&parse(s), dir));
@@ -897,7 +968,9 @@ metadata:
     fn a_comment_mentioning_description_above_name_is_not_a_false_positive() {
         // skill-check's `field_order` rule string-matches raw YAML and false-positives when a comment
         // containing `description:` precedes `name:`. `the` parses the AST, so this must be clean.
-        let p = parse("---\n# note: description: comes later\nname: a\ndescription: real\n---\n");
+        let p = parse(
+            "---\n# note: description: comes later\nname: a\ndescription: a real useful thing\n---\n",
+        );
         assert_eq!(err_code(&p), None);
         assert!(lint(&p, "a").is_empty());
     }
@@ -927,7 +1000,7 @@ metadata:
     fn name_matches_directory_under_nfkc() {
         // `name: café` with a composed é (U+00E9) vs a directory using a decomposed é (U+0065 U+0301).
         // Under NFKC they are equal, so no name-mismatch should be reported.
-        let p = parse("---\nname: caf\u{e9}\ndescription: x\n---\n");
+        let p = parse("---\nname: caf\u{e9}\ndescription: a clear useful tool\n---\n");
         let dir = "cafe\u{301}";
         assert!(
             lint(&p, dir).iter().all(|pr| pr.code != "name-mismatch"),
