@@ -119,7 +119,7 @@ fn skills_lint_exits_zero_when_clean_or_only_spec_notes() {
     let clean_dir = sb.home().join(".claude/skills/clean-skill");
     sb.skill(
         &clean_dir,
-        "---\nname: clean-skill\ndescription: Clean skill.\nallowed-tools: Read Bash(git:*)\n---\n\nSee [guide](references/guide.md).\n",
+        "---\nname: clean-skill\ndescription: A clean example skill for tests.\nallowed-tools: Read Bash(git:*)\n---\n\nSee [guide](references/guide.md).\n",
     );
     fs::create_dir_all(clean_dir.join("references")).unwrap();
     fs::write(clean_dir.join("references/guide.md"), "# Guide\n").unwrap();
@@ -139,7 +139,7 @@ clean-skill  user   ok      claude, opencode, goose  -
     // Add a skill with only an advisory spec lint (`unknown-frontmatter-key`); still exits 0.
     sb.skill(
         &sb.home().join(".claude/skills/spec-note"),
-        "---\nname: spec-note\ndescription: Advisory only.\ncustom-key: true\n---\n\nBody.\n",
+        "---\nname: spec-note\ndescription: An advisory only example skill.\ncustom-key: true\n---\n\nBody.\n",
     );
     let o_note = sb.run(&["skills", "lint"]);
     assert_eq!(o_note.status.code(), Some(0), "stderr: {}", stderr(&o_note));

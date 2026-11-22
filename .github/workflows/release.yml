@@ -213,6 +213,7 @@ jobs:
           cp "target/${target}/release/the" "dist/${stage}/the"
           cp "target/${target}/release/th" "dist/${stage}/th"
           cp README.md docs/LICENSE-MIT docs/LICENSE-APACHE "dist/${stage}/"
+          install -m 0755 scripts/install.sh "dist/${stage}/install.sh"
           tar -C dist -czf "dist/${stage}.tar.gz" "${stage}"
           (cd dist && shasum -a 256 "${stage}.tar.gz" > "${stage}.tar.gz.sha256")
 

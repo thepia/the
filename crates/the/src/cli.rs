@@ -62,11 +62,20 @@ pub enum SkillsCmd {
         search: SearchArgs,
     },
     /// List the directories each agent searches for skills, and where symlinked ones lead.
-    Dirs(SearchArgs),
+    Dirs {
+        /// Optional directory or project PATH to also scan (equivalent to `--dir <PATH>`; the user's
+        /// own skills are still included unless `--no-user`).
+        path: Option<PathBuf>,
+        #[command(flatten)]
+        search: SearchArgs,
+    },
     /// Lint skills for agent loadability, spec conformance, broken local links, and security hazards.
     Lint {
-        /// Optional skill name (frontmatter `name`, or its directory name) to lint a single skill.
-        name: Option<String>,
+        /// A skill name (frontmatter `name`, or its directory name) to lint one skill, OR a relative or
+        /// absolute PATH (one containing `/`, starting with `~`, or `.`/`..`) to also lint the skills in
+        /// that directory or project (equivalent to `--dir <PATH>`; the user's own skills are still
+        /// included unless `--no-user`, and `--scope dir` restricts to just the given path).
+        target: Option<String>,
         #[command(flatten)]
         search: SearchArgs,
         /// Show every issue, not just the 5 most urgent.
@@ -92,6 +101,10 @@ pub enum ListForm {
 
 #[derive(Debug, Args)]
 pub struct ListArgs {
+    /// Optional directory or project PATH to also list skills from (equivalent to `--dir <PATH>`; the
+    /// user's own skills are still included unless `--no-user`).
+    pub path: Option<PathBuf>,
+
     #[command(flatten)]
     pub search: SearchArgs,
 
@@ -120,16 +133,20 @@ impl ListArgs {
     }
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Clone, Args)]
 pub struct SearchArgs {
-    /// Also search this skills directory (each child directory holding a SKILL.md is a skill).
-    /// Repeatable.
+    /// Also search this skills directory or project root (each child holding a SKILL.md is a skill, and
+    /// a project's `.claude/skills`, `.agents/skills`, ... are discovered under it). Repeatable.
     #[arg(long = "dir", value_name = "PATH")]
     pub dirs: Vec<PathBuf>,
 
     /// Only consider this scope.
     #[arg(long, value_enum)]
     pub scope: Option<Scope>,
+
+    /// Exclude the user's own skills (`~/.claude/skills` and the other per-agent user roots) from the scan.
+    #[arg(long)]
+    pub no_user: bool,
 
     /// Only what this agent loads (for `dirs`: only where it searches).
     #[arg(long, value_enum)]

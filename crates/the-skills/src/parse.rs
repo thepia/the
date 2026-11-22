@@ -19,6 +19,33 @@ use crate::Agent;
 const NAME_MAX: usize = 64;
 const DESCRIPTION_MAX: usize = 1024;
 const COMPATIBILITY_MAX: usize = 500;
+/// A present description is too terse when it is BOTH short (fewer than `DESCRIPTION_TERSE_MAX` chars)
+/// and sparse (fewer than `DESCRIPTION_MIN_WORDS` meaningful words): a bare noun phrase like "PDF tools"
+/// an agent cannot route on. A `note`, not an error (it still loads). Both conditions are required so a
+/// minimal-but-real description ("Work with PDF files") and an oddly long low-variety one are not
+/// flagged. Motivated by SkillMD SK010 and the skill-quality correlation study (description budget is
+/// the top adoption signal).
+const DESCRIPTION_MIN_WORDS: usize = 3;
+const DESCRIPTION_TERSE_MAX: usize = 40;
+
+/// Claude Code `effort:` levels and the fields that must hold a boolean (frontmatter reference,
+/// code.claude.com/docs/en/skills, checked 2026-11-22). `model` and `agent` are deliberately absent:
+/// their valid values are open sets (any `/model` value; built-in or custom agents), so enumerating
+/// them would flag valid skills. Re-check when Claude Code changes these.
+const EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+const BOOL_FIELDS: &[&str] = &["disable-model-invocation", "user-invocable", "background"];
+/// Closed value set for the Claude Code `shell` field (code.claude.com/docs/en/skills, checked
+/// 2026-11-22): the shell that runs `!` commands, or `0` to turn the shell tool off.
+const SHELL_VALUES: &[&str] = &["bash", "powershell", "0"];
+/// Frontmatter fields whose value is a space/comma-delimited string OR a list of strings, each paired
+/// with the lint code to emit when it is neither. One table drives the check so a new such field is a
+/// row, not another ad-hoc match (the metadata-table principle).
+const STRING_OR_LIST_FIELDS: &[(&str, &str)] = &[
+    ("allowed-tools", "allowed-tools-invalid"),
+    ("disallowed-tools", "list-field-invalid"),
+    ("paths", "list-field-invalid"),
+    ("arguments", "list-field-invalid"),
+];
 
 /// Portable top-level keys defined by the Agent Skills (agentskills.io) specification.
 const SPEC_KEYS: &[&str] = &[
@@ -72,6 +99,8 @@ pub enum ProblemKind {
 pub struct Problem {
     pub code: &'static str,
     pub message: String,
+    /// Why it matters: the concrete consequence (from the rule registry).
+    pub why: &'static str,
     /// How to fix it.
     pub fix: &'static str,
     /// The 1-based SKILL.md line this problem points at, when it has a source location (link, asset,
@@ -87,13 +116,13 @@ pub struct Problem {
 impl Problem {
     pub fn new(code: &'static str, message: impl Into<String>) -> Self {
         // Single source of truth: the rule registry (the-skills `rules`), not a parallel match.
-        let fix = crate::rules::rule(code)
-            .unwrap_or_else(|| unreachable!("every problem code is in the rule registry: {code}"))
-            .fix;
+        let rule = crate::rules::rule(code)
+            .unwrap_or_else(|| unreachable!("every problem code is in the rule registry: {code}"));
         Self {
             code,
             message: message.into(),
-            fix,
+            why: rule.why,
+            fix: rule.fix,
             line: None,
             col: None,
         }
@@ -132,6 +161,9 @@ pub struct Parsed {
     pub body: String,
     /// 1-based line number in `SKILL.md` where `body` starts.
     pub body_start_line: usize,
+    /// Count of `\n` at the very end of the file (LF). Exactly 1 is well-formed;
+    /// 0 (no final newline) or >1 (trailing blank lines) drives `trailing-newline`.
+    pub trailing_newlines: usize,
 }
 
 impl Parsed {
@@ -186,6 +218,7 @@ pub fn parse(text: &str) -> Parsed {
     let mut out = Parsed {
         body: trimmed_body.to_owned(),
         body_start_line: 3 + yaml_lines + stripped_newlines,
+        trailing_newlines: text.len() - text.trim_end_matches('\n').len(),
         ..Parsed::default()
     };
     let invalid = |m: String| Some(Problem::new("frontmatter-invalid", m));
@@ -193,12 +226,23 @@ pub fn parse(text: &str) -> Parsed {
         // Marker lines are 1-based within the frontmatter; +1 for the opening `---` gives the
         // SKILL.md line. Columns are 0-based.
         Err(e) => {
-            out.frontmatter_error = invalid(format!(
-                "invalid YAML at SKILL.md line {} column {}: {}",
-                e.marker().line() + 1,
-                e.marker().col() + 1,
-                e.info()
-            ))
+            // A duplicated top-level key is the common, specific cause: report it precisely, pointing
+            // at the second occurrence, rather than the generic parser error.
+            out.frontmatter_error = match first_duplicate_key(&yaml) {
+                Some((key, line)) => Some(
+                    Problem::new(
+                        "duplicate-frontmatter-key",
+                        format!("`{key}` is set more than once; only the last value is kept"),
+                    )
+                    .at_line(line),
+                ),
+                None => invalid(format!(
+                    "invalid YAML at SKILL.md line {} column {}: {}",
+                    e.marker().line() + 1,
+                    e.marker().col() + 1,
+                    e.info()
+                )),
+            }
         }
         Ok(docs) => match docs.into_iter().next() {
             None | Some(Yaml::Null) => {}
@@ -222,6 +266,66 @@ pub fn parse(text: &str) -> Parsed {
         },
     }
     out
+}
+
+/// The first duplicated top-level frontmatter key and the 1-based SKILL.md line of its second
+/// occurrence. `yaml` is the frontmatter body (after the opening `---`), so its line `i` (0-based) maps
+/// to SKILL.md line `i + 2`. Nested keys are indented, so only column-0 `key:` lines are considered.
+fn first_duplicate_key(yaml: &str) -> Option<(String, usize)> {
+    let mut seen = std::collections::BTreeSet::new();
+    for (i, line) in yaml.lines().enumerate() {
+        if line.starts_with([' ', '\t', '#']) {
+            continue;
+        }
+        let Some((key, _)) = line.split_once(':') else {
+            continue;
+        };
+        let key = key.trim();
+        if key.is_empty()
+            || !key
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+        {
+            continue;
+        }
+        if !seen.insert(key.to_owned()) {
+            return Some((key.to_owned(), i + 2));
+        }
+    }
+    None
+}
+
+/// Whether a value is an accepted boolean for a Claude Code boolean field: a YAML bool, `0`/`1`, or a
+/// string `yes`/`no`/`on`/`off`/`true`/`false`/`1`/`0` (case-insensitive), per the frontmatter reference.
+fn is_boolean_like(v: &Value) -> bool {
+    match v {
+        Value::Bool(_) => true,
+        Value::Number(n) => n.as_i64() == Some(0) || n.as_i64() == Some(1),
+        Value::String(s) => matches!(
+            s.to_ascii_lowercase().as_str(),
+            "yes" | "no" | "on" | "off" | "true" | "false" | "1" | "0"
+        ),
+        _ => false,
+    }
+}
+
+/// A `shell` value in the closed set `{bash, powershell, 0}`. `0` may parse as the integer `0` or the
+/// string `"0"`, so both forms are accepted.
+fn is_valid_shell(v: &Value) -> bool {
+    if let Some(s) = v.as_str() {
+        return SHELL_VALUES.contains(&s);
+    }
+    v.as_i64() == Some(0)
+}
+
+/// A value that is a single string or a list whose every element is a string (the shape Claude Code's
+/// `allowed-tools` / `disallowed-tools` / `paths` / `arguments` fields accept).
+fn is_string_or_list_of_strings(v: &Value) -> bool {
+    match v {
+        Value::String(_) => true,
+        Value::Array(items) => items.iter().all(Value::is_string),
+        _ => false,
+    }
 }
 
 fn to_json(y: Yaml) -> Value {
@@ -411,6 +515,69 @@ pub fn name_format_ok(name: &str) -> bool {
         && !name.contains("--")
 }
 
+/// Count of meaningful words in a description: whitespace tokens that carry a letter or digit and are
+/// at least two characters. Drives the `description-too-terse` discovery-quality lint.
+fn description_word_count(desc: &str) -> usize {
+    desc.split_whitespace()
+        .filter(|w| w.chars().count() >= 2 && w.chars().any(char::is_alphanumeric))
+        .count()
+}
+
+/// The first vague/generic filler phrase in a description, if any. A description is an agent's only
+/// routing signal, so filler like "various tasks" or "and much more" tells it nothing about *when*
+/// to load the skill. The list is deliberately narrow (strong markers only) to keep false positives
+/// low; the rule ships Beta. Matching is case-insensitive on a whitespace-collapsed form, so runs of
+/// spaces or newlines in the phrase do not defeat it.
+fn vague_description_phrase(desc: &str) -> Option<&'static str> {
+    const VAGUE_PHRASES: &[&str] = &[
+        "various tasks",
+        "many tasks",
+        "a variety of tasks",
+        "all kinds of",
+        "all sorts of",
+        "anything you need",
+        "whatever you need",
+        "and much more",
+        "and lots more",
+        "does everything",
+        "general utility",
+        "a variety of things",
+        "many things",
+        "helps with various",
+    ];
+    let normalized = desc.split_whitespace().collect::<Vec<_>>().join(" ");
+    let haystack = normalized.to_ascii_lowercase();
+    VAGUE_PHRASES
+        .iter()
+        .find(|phrase| haystack.contains(**phrase))
+        .copied()
+}
+
+/// Meaningful tokens of a string: lowercase alphanumeric runs of at least two characters, splitting on
+/// anything else (so `pdf-tools` -> {pdf, tools}). Drives `description-echoes-name`.
+fn meaningful_tokens(s: &str) -> std::collections::BTreeSet<String> {
+    s.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.chars().count() >= 2)
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// The first placeholder / template marker found in a skill body, if any: an unambiguous sign the
+/// skill was left unfinished. Deliberately conservative (no bare `TODO`/`FIXME`, which legitimately
+/// appear in skills about task tracking, and no `{{` which appears in templating skills).
+fn unfinished_marker(body: &str) -> Option<&'static str> {
+    const MARKERS: &[&str] = &[
+        "lorem ipsum",
+        "<placeholder",
+        "replace_me",
+        "replace_this",
+        "your-name-here",
+        "your name here",
+    ];
+    let lower = body.to_lowercase();
+    MARKERS.iter().copied().find(|m| lower.contains(m))
+}
+
 /// Advisory Agent Skills format checks; only run on frontmatter that parsed.
 pub fn lint(p: &Parsed, dir_name: &str) -> Vec<Problem> {
     let mut out = Vec::new();
@@ -450,7 +617,32 @@ pub fn lint(p: &Parsed, dir_name: &str) -> Vec<Problem> {
                 d.chars().count()
             ),
         )),
-        Some(_) => {}
+        Some(d)
+            if d.chars().count() < DESCRIPTION_TERSE_MAX
+                && description_word_count(d) < DESCRIPTION_MIN_WORDS =>
+        {
+            out.push(Problem::new(
+                "description-too-terse",
+                format!(
+                    "`description` has {} meaningful words; too terse for an agent to route on, say what the skill does and when to use it",
+                    description_word_count(d)
+                ),
+            ));
+        }
+        // A description long enough to pass the terse check can still be generic filler; a vague
+        // phrase gives an agent nothing concrete to route on. (A distinctive-token-count floor was
+        // considered for TRIG1 but rejected: it flags this project's canonical-good terse descriptions
+        // like "Work with PDFs." -- see terse_description_is_flagged_but_minimal_real_ones_pass.)
+        Some(d) => {
+            if let Some(phrase) = vague_description_phrase(d) {
+                out.push(Problem::new(
+                    "description-vague-generic",
+                    format!(
+                        "`description` uses the vague phrase `{phrase}`; name the concrete task and when to use the skill, not generic filler"
+                    ),
+                ));
+            }
+        }
     }
     if let Some(v) = p.frontmatter.get("license")
         && !v.is_string()
@@ -492,16 +684,15 @@ pub fn lint(p: &Parsed, dir_name: &str) -> Vec<Problem> {
             ));
         }
     }
-    if let Some(v) = p.frontmatter.get("allowed-tools") {
-        let valid = match v {
-            Value::String(_) => true,
-            Value::Array(items) => items.iter().all(Value::is_string),
-            _ => false,
-        };
-        if !valid {
+    for (field, code) in STRING_OR_LIST_FIELDS {
+        if let Some(v) = p.frontmatter.get(*field)
+            && !is_string_or_list_of_strings(v)
+        {
             out.push(Problem::new(
-                "allowed-tools-invalid",
-                "frontmatter `allowed-tools` must be a space-delimited string or list of strings",
+                code,
+                format!(
+                    "frontmatter `{field}` must be a space/comma-delimited string or a list of strings"
+                ),
             ));
         }
     }
@@ -517,6 +708,100 @@ pub fn lint(p: &Parsed, dir_name: &str) -> Vec<Problem> {
             "unknown-frontmatter-key",
             format!("unknown frontmatter key `{k}`"),
         ));
+    }
+    // A description whose meaningful words are all already in the name adds no routing information.
+    if let (Some(name), Some(desc)) = (
+        p.str_field("name").filter(|n| !n.is_empty()),
+        p.str_field("description")
+            .map(str::trim)
+            .filter(|d| !d.is_empty()),
+    ) {
+        let desc_tokens = meaningful_tokens(desc);
+        if !desc_tokens.is_empty() && desc_tokens.is_subset(&meaningful_tokens(name)) {
+            out.push(Problem::new(
+                "description-echoes-name",
+                "`description` only repeats the skill name; it adds no routing information",
+            ));
+        }
+    }
+    // Angle brackets in the description break Codex's skill parser.
+    if let Some(d) = p.str_field("description")
+        && (d.contains('<') || d.contains('>'))
+    {
+        out.push(Problem::new(
+            "description-angle-brackets",
+            "`description` contains `<` or `>`, which breaks Codex's skill parser",
+        ));
+    }
+    // Claude Code extended field values (closed sets / type / dependency; open sets are not checked).
+    if let Some(v) = p.frontmatter.get("context")
+        && v.as_str() != Some("fork")
+    {
+        out.push(Problem::new(
+            "context-invalid",
+            "`context` must be `fork` (or omitted for the default inline behavior)",
+        ));
+    }
+    if let Some(v) = p.frontmatter.get("effort")
+        && !v.as_str().is_some_and(|s| EFFORT_LEVELS.contains(&s))
+    {
+        out.push(Problem::new(
+            "effort-invalid",
+            "`effort` must be one of `low`, `medium`, `high`, `xhigh`, `max`",
+        ));
+    }
+    if p.frontmatter.contains_key("agent")
+        && p.frontmatter.get("context").and_then(Value::as_str) != Some("fork")
+    {
+        out.push(Problem::new(
+            "agent-without-context",
+            "`agent` is only used by a forked skill; add `context: fork` or remove `agent`",
+        ));
+    }
+    if p.frontmatter.contains_key("background")
+        && p.frontmatter.get("context").and_then(Value::as_str) != Some("fork")
+    {
+        out.push(Problem::new(
+            "background-without-context",
+            "`background` only applies to a forked skill; add `context: fork` or remove `background`",
+        ));
+    }
+    if let Some(v) = p.frontmatter.get("shell")
+        && !is_valid_shell(v)
+    {
+        out.push(Problem::new(
+            "shell-invalid",
+            "`shell` must be `bash`, `powershell`, or `0` (to turn the shell tool off)",
+        ));
+    }
+    for field in BOOL_FIELDS {
+        if let Some(v) = p.frontmatter.get(*field)
+            && !is_boolean_like(v)
+        {
+            out.push(Problem::new(
+                "non-boolean-field",
+                format!("`{field}` must be a boolean (true/false, yes/no, on/off, or 1/0)"),
+            ));
+        }
+    }
+    // Placeholder / template markers left in the body: the skill looks unfinished.
+    if let Some(marker) = unfinished_marker(&p.body) {
+        out.push(Problem::new(
+            "unfinished-skill",
+            format!("body contains the placeholder `{marker}`; the skill looks unfinished"),
+        ));
+    }
+    // Exactly one trailing newline is well-formed (Beta: staged behind `--beta`).
+    if p.trailing_newlines != 1 {
+        let detail = if p.trailing_newlines == 0 {
+            "SKILL.md does not end with a newline".to_owned()
+        } else {
+            format!(
+                "SKILL.md ends with {} trailing newlines",
+                p.trailing_newlines
+            )
+        };
+        out.push(Problem::new("trailing-newline", detail));
     }
     out
 }
@@ -557,6 +842,133 @@ mod tests {
 
     fn err_code(p: &Parsed) -> Option<&'static str> {
         p.frontmatter_error.as_ref().map(|e| e.code)
+    }
+
+    #[test]
+    fn vague_description_is_flagged_but_concrete_one_is_not() {
+        // A long-enough but generic description trips the vague check.
+        let vague = "---\nname: helper\ndescription: A helpful assistant for various tasks and much more to boost productivity.\n---\n\nBody.\n";
+        assert!(
+            codes(&lint(&parse(vague), "helper")).contains(&"description-vague-generic"),
+            "a generic filler description must be flagged"
+        );
+        // A concrete description that happens to say what and when must not trip.
+        let concrete = "---\nname: pdf-split\ndescription: Split a PDF into one file per page when a user asks to break up a document.\n---\n\nBody.\n";
+        assert!(
+            !codes(&lint(&parse(concrete), "pdf-split")).contains(&"description-vague-generic"),
+            "a concrete description must not be flagged"
+        );
+    }
+
+    #[test]
+    fn trailing_newline_flags_missing_and_extra_only() {
+        let base = "---\nname: a\ndescription: a clear useful tool\n---\n\nBody.";
+        // Exactly one trailing newline: well-formed, no flag.
+        assert!(
+            !codes(&lint(&parse(&format!("{base}\n")), "a")).contains(&"trailing-newline"),
+            "one trailing newline must be accepted"
+        );
+        // No final newline: flagged.
+        assert!(
+            codes(&lint(&parse(base), "a")).contains(&"trailing-newline"),
+            "a missing final newline must be flagged"
+        );
+        // Two trailing newlines: flagged.
+        assert!(
+            codes(&lint(&parse(&format!("{base}\n\n")), "a")).contains(&"trailing-newline"),
+            "extra trailing newlines must be flagged"
+        );
+        // A frontmatter-only skill ending in one newline is well-formed (counted from the
+        // file, not the empty body).
+        assert!(
+            !codes(&lint(
+                &parse("---\nname: a\ndescription: a clear useful tool\n---\n"),
+                "a"
+            ))
+            .contains(&"trailing-newline"),
+            "a body-less skill with one trailing newline must be accepted"
+        );
+    }
+
+    #[test]
+    fn duplicate_frontmatter_key_points_at_the_second_occurrence() {
+        // `name` is on SKILL.md lines 2 and 3; the dup is reported specifically, pointed at line 3.
+        let p = parse("---\nname: a\nname: b\ndescription: x\n---\n\nB.\n");
+        let e = p.frontmatter_error.as_ref().unwrap();
+        assert_eq!(e.code, "duplicate-frontmatter-key");
+        assert_eq!(e.line, Some(3));
+        assert!(e.message.contains("`name`"), "{}", e.message);
+        // A non-duplicate YAML error still reports as the generic frontmatter-invalid.
+        assert_eq!(
+            err_code(&parse("---\n? [a, b]: v\n---\n")),
+            Some("frontmatter-invalid")
+        );
+    }
+
+    #[test]
+    fn description_angle_brackets_flag_codex_breakage() {
+        let f = |d: &str| {
+            codes(&lint(
+                &parse(&format!("---\nname: a\ndescription: {d}\n---\n\nB.\n")),
+                "a",
+            ))
+            .contains(&"description-angle-brackets")
+        };
+        assert!(f("Render <div> templates"));
+        assert!(!f("Render HTML templates")); // plain prose does not fire
+    }
+
+    #[test]
+    fn claude_code_field_values_are_validated() {
+        let l = |fm: &str| {
+            codes(&lint(
+                &parse(&format!(
+                    "---\nname: a\ndescription: a clear useful tool\n{fm}\n---\n\nB.\n"
+                )),
+                "a",
+            ))
+        };
+        // context: closed set {fork}.
+        assert!(l("context: inline").contains(&"context-invalid"));
+        assert!(!l("context: fork").contains(&"context-invalid"));
+        // effort: closed set.
+        assert!(l("effort: ultra").contains(&"effort-invalid"));
+        assert!(!l("effort: xhigh").contains(&"effort-invalid"));
+        // agent is only used with context: fork.
+        assert!(l("agent: Explore").contains(&"agent-without-context"));
+        assert!(!l("context: fork\nagent: Explore").contains(&"agent-without-context"));
+        // boolean fields accept true/false, yes/no, on/off, 1/0; anything else is flagged.
+        assert!(l("user-invocable: maybe").contains(&"non-boolean-field"));
+        for good in ["true", "false", "yes", "no", "on", "off", "1", "0"] {
+            assert!(
+                !l(&format!("user-invocable: {good}")).contains(&"non-boolean-field"),
+                "`{good}` is a valid boolean form"
+            );
+        }
+        // background, like agent, only applies with context: fork.
+        assert!(l("background: true").contains(&"background-without-context"));
+        assert!(!l("context: fork\nbackground: true").contains(&"background-without-context"));
+        // shell: closed set {bash, powershell, 0}; `0` may be an int or a string.
+        assert!(l("shell: fish").contains(&"shell-invalid"));
+        assert!(!l("shell: bash").contains(&"shell-invalid"));
+        assert!(!l("shell: powershell").contains(&"shell-invalid"));
+        assert!(!l("shell: 0").contains(&"shell-invalid"));
+        assert!(!l("shell: \"0\"").contains(&"shell-invalid"));
+        // disallowed-tools / paths / arguments: string or list of strings, else list-field-invalid.
+        for field in ["disallowed-tools", "paths", "arguments"] {
+            assert!(
+                l(&format!("{field}: 42")).contains(&"list-field-invalid"),
+                "`{field}: 42` (a scalar number) must be flagged"
+            );
+            assert!(
+                !l(&format!("{field}: \"a, b\"")).contains(&"list-field-invalid"),
+                "`{field}` as a string is valid"
+            );
+            assert!(
+                !l(&format!("{field}:\n  - a\n  - b")).contains(&"list-field-invalid"),
+                "`{field}` as a list of strings is valid"
+            );
+        }
     }
 
     #[test]
@@ -705,15 +1117,21 @@ mod tests {
         let l = |s: &str, dir: &str| codes(&lint(&parse(s), dir));
         assert!(l(GOOD, "pdf-tools").is_empty());
         assert_eq!(
-            l("---\nname: PDF\ndescription: x\n---\n", "PDF"),
+            l(
+                "---\nname: PDF\ndescription: a clear useful tool\n---\n",
+                "PDF"
+            ),
             ["name-format"]
         );
         assert_eq!(
-            l("---\nname: a--b\ndescription: x\n---\n", "a--b"),
+            l(
+                "---\nname: a--b\ndescription: a clear useful tool\n---\n",
+                "a--b"
+            ),
             ["name-format"]
         );
         assert_eq!(
-            l("---\nname: a\ndescription: x\n---\n", "b"),
+            l("---\nname: a\ndescription: a clear useful tool\n---\n", "b"),
             ["name-mismatch"]
         );
         assert_eq!(l("---\nname: a\n---\n", "a"), ["description-missing"]);
@@ -736,7 +1154,7 @@ mod tests {
         let extensions = "\
 ---
 name: a
-description: Desc
+description: a clear useful tool
 license: MIT
 compatibility: Requires git and python3
 allowed-tools: Read Grep Glob
@@ -759,7 +1177,7 @@ metadata:
         // Array of strings in allowed-tools is also accepted.
         assert!(
             l(
-                "---\nname: a\ndescription: x\nallowed-tools:\n  - Read\n  - Write\n---\n",
+                "---\nname: a\ndescription: a clear useful tool\nallowed-tools:\n  - Read\n  - Write\n---\n",
                 "a"
             )
             .is_empty()
@@ -768,45 +1186,51 @@ metadata:
         // Invalid compatibility: empty, non-string, or > 500 chars.
         assert_eq!(
             l(
-                "---\nname: a\ndescription: x\ncompatibility: \"   \"\n---\n",
+                "---\nname: a\ndescription: a clear useful tool\ncompatibility: \"   \"\n---\n",
                 "a"
             ),
             ["compatibility-invalid"]
         );
         assert_eq!(
             l(
-                "---\nname: a\ndescription: x\ncompatibility: 123\n---\n",
+                "---\nname: a\ndescription: a clear useful tool\ncompatibility: 123\n---\n",
                 "a"
             ),
             ["compatibility-invalid"]
         );
         let long_compat = format!(
-            "---\nname: a\ndescription: x\ncompatibility: {}\n---\n",
+            "---\nname: a\ndescription: a clear useful tool\ncompatibility: {}\n---\n",
             "c".repeat(COMPATIBILITY_MAX + 1)
         );
         assert_eq!(l(&long_compat, "a"), ["compatibility-invalid"]);
 
         // Invalid license: non-string.
         assert_eq!(
-            l("---\nname: a\ndescription: x\nlicense: 42\n---\n", "a"),
+            l(
+                "---\nname: a\ndescription: a clear useful tool\nlicense: 42\n---\n",
+                "a"
+            ),
             ["license-not-string"]
         );
 
         // Invalid metadata: non-mapping or nested array/object values.
         assert_eq!(
-            l("---\nname: a\ndescription: x\nmetadata: plain\n---\n", "a"),
-            ["metadata-not-map"]
-        );
-        assert_eq!(
             l(
-                "---\nname: a\ndescription: x\nmetadata:\n  nested:\n    k: v\n---\n",
+                "---\nname: a\ndescription: a clear useful tool\nmetadata: plain\n---\n",
                 "a"
             ),
             ["metadata-not-map"]
         );
         assert_eq!(
             l(
-                "---\nname: a\ndescription: x\nmetadata:\n  list:\n    - item\n---\n",
+                "---\nname: a\ndescription: a clear useful tool\nmetadata:\n  nested:\n    k: v\n---\n",
+                "a"
+            ),
+            ["metadata-not-map"]
+        );
+        assert_eq!(
+            l(
+                "---\nname: a\ndescription: a clear useful tool\nmetadata:\n  list:\n    - item\n---\n",
                 "a"
             ),
             ["metadata-not-map"]
@@ -815,14 +1239,14 @@ metadata:
         // Invalid allowed-tools: non-string / non-string-array.
         assert_eq!(
             l(
-                "---\nname: a\ndescription: x\nallowed-tools: 99\n---\n",
+                "---\nname: a\ndescription: a clear useful tool\nallowed-tools: 99\n---\n",
                 "a"
             ),
             ["allowed-tools-invalid"]
         );
         assert_eq!(
             l(
-                "---\nname: a\ndescription: x\nallowed-tools:\n  - 99\n---\n",
+                "---\nname: a\ndescription: a clear useful tool\nallowed-tools:\n  - 99\n---\n",
                 "a"
             ),
             ["allowed-tools-invalid"]
@@ -830,7 +1254,10 @@ metadata:
 
         // Unknown top-level frontmatter key.
         assert_eq!(
-            l("---\nname: a\ndescription: x\ncustom-key: val\n---\n", "a"),
+            l(
+                "---\nname: a\ndescription: a clear useful tool\ncustom-key: val\n---\n",
+                "a"
+            ),
             ["unknown-frontmatter-key"]
         );
     }
@@ -844,14 +1271,21 @@ metadata:
         let l = |s: &str, dir: &str| codes(&lint(&parse(s), dir));
         for name in ["a", "3d-tools", "1", "a1", &"a".repeat(NAME_MAX)] {
             assert!(
-                l(&format!("---\nname: {name}\ndescription: x\n---\n"), name).is_empty(),
+                l(
+                    &format!("---\nname: {name}\ndescription: a clear useful tool\n---\n"),
+                    name
+                )
+                .is_empty(),
                 "name `{name}` must be accepted"
             );
         }
         // And fires on the real violations.
         for name in ["-a", "a-", "a b", "A", &"a".repeat(NAME_MAX + 1)] {
             assert_eq!(
-                l(&format!("---\nname: {name}\ndescription: x\n---\n"), name),
+                l(
+                    &format!("---\nname: {name}\ndescription: a clear useful tool\n---\n"),
+                    name
+                ),
                 ["name-format"],
                 "name `{name}` must be rejected"
             );
@@ -884,6 +1318,67 @@ metadata:
     }
 
     #[test]
+    fn terse_description_is_flagged_but_minimal_real_ones_pass() {
+        let l = |s: &str, dir: &str| codes(&lint(&parse(s), dir));
+        // Bare noun phrase: short + sparse -> flagged.
+        assert_eq!(
+            l("---\nname: a\ndescription: PDF tools\n---\n", "a"),
+            ["description-too-terse"]
+        );
+        assert_eq!(
+            l("---\nname: a\ndescription: database\n---\n", "a"),
+            ["description-too-terse"]
+        );
+        // A minimal-but-real description (>=3 meaningful words) is clean.
+        assert!(l("---\nname: a\ndescription: Work with PDF files\n---\n", "a").is_empty());
+        // Short but 3 words (the canonical GOOD description) is clean.
+        assert!(l("---\nname: a\ndescription: Work with PDFs.\n---\n", "a").is_empty());
+        // Long low-variety descriptions are not "terse" (the char guard): clean here.
+        let long_one_word = format!("---\nname: a\ndescription: {}\n---\n", "x".repeat(50));
+        assert!(l(&long_one_word, "a").is_empty());
+    }
+
+    #[test]
+    fn description_echoing_the_name_is_flagged() {
+        let l = |s: &str, dir: &str| codes(&lint(&parse(s), dir));
+        // Description only restates the name (3 words, so not also terse) -> flagged.
+        assert_eq!(
+            l(
+                "---\nname: pdf-document-tools\ndescription: PDF document tools\n---\n",
+                "pdf-document-tools"
+            ),
+            ["description-echoes-name"]
+        );
+        // Adds information beyond the name -> clean.
+        assert!(
+            l(
+                "---\nname: pdf-tools\ndescription: Fill and merge PDF forms\n---\n",
+                "pdf-tools"
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn placeholder_body_markers_flag_an_unfinished_skill() {
+        let terse = codes(&lint(
+            &parse(
+                "---\nname: a\ndescription: a clear useful tool\n---\n\nTODO: lorem ipsum dolor.\n",
+            ),
+            "a",
+        ));
+        assert_eq!(terse, ["unfinished-skill"]);
+        // A skill whose body merely mentions tasks is not flagged (no template marker).
+        assert!(
+            codes(&lint(
+                &parse("---\nname: a\ndescription: a clear useful tool\n---\n\nManage your TODO list.\n"),
+                "a",
+            ))
+            .is_empty()
+        );
+    }
+
+    #[test]
     fn whitespace_only_description_is_missing() {
         // skill-check `description.non_empty`: whitespace-only counts as empty.
         let l = |s: &str, dir: &str| codes(&lint(&parse(s), dir));
@@ -897,7 +1392,9 @@ metadata:
     fn a_comment_mentioning_description_above_name_is_not_a_false_positive() {
         // skill-check's `field_order` rule string-matches raw YAML and false-positives when a comment
         // containing `description:` precedes `name:`. `the` parses the AST, so this must be clean.
-        let p = parse("---\n# note: description: comes later\nname: a\ndescription: real\n---\n");
+        let p = parse(
+            "---\n# note: description: comes later\nname: a\ndescription: a real useful thing\n---\n",
+        );
         assert_eq!(err_code(&p), None);
         assert!(lint(&p, "a").is_empty());
     }
@@ -927,7 +1424,7 @@ metadata:
     fn name_matches_directory_under_nfkc() {
         // `name: café` with a composed é (U+00E9) vs a directory using a decomposed é (U+0065 U+0301).
         // Under NFKC they are equal, so no name-mismatch should be reported.
-        let p = parse("---\nname: caf\u{e9}\ndescription: x\n---\n");
+        let p = parse("---\nname: caf\u{e9}\ndescription: a clear useful tool\n---\n");
         let dir = "cafe\u{301}";
         assert!(
             lint(&p, dir).iter().all(|pr| pr.code != "name-mismatch"),

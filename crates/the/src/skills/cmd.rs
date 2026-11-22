@@ -1,7 +1,7 @@
 //! `the skills list | show | dirs | lint`. Each builds a [`Report`]; rendering is format-independent.
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use serde_json::{Value, json};
@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use super::analysis::corpus_findings;
 use super::fix::{self, Advice, FixClass};
 use super::installed::installed_agents;
-use super::locate::{Env, plan, plan_for};
+use super::locate::{Env, SearchRoot, plan, plan_for};
 use super::parse::{Problem, ProblemKind};
 use super::resolve::{Catalog, RootInfo, Skill, Status, build, build_for};
 use super::{Agent, Scope, bundled_files};
@@ -21,26 +21,70 @@ use crate::table::{Block, Cell, Column, Human, Record, Report, Table, Tone};
 
 const DESCRIPTION_WIDTH: usize = 72;
 
+/// A positional target is a filesystem PATH (a scan root), not a skill name, when it is path-like: a
+/// skill `name` is a slug (lowercase letters, digits, single hyphens) that can never contain any of
+/// these, so the two never collide. Use `./name` to force a bare word to be read as a path.
+fn is_path_like(s: &str) -> bool {
+    s.contains('/') || s.contains('\\') || s.starts_with('~') || s == "." || s == ".."
+}
+
+/// `search` with `root` added as a `--dir` scan root. The positional path is additive, exactly like
+/// `--dir`: the agent roots (including the user's own skills) stay in the scan unless the caller
+/// narrows them with `--no-user` or `--scope dir`.
+fn with_root(search: &SearchArgs, root: PathBuf) -> SearchArgs {
+    let mut s = search.clone();
+    s.dirs.push(root);
+    s
+}
+
+/// Fold an optional positional `<path>` (list/dirs) into the search as a scan root.
+fn with_positional(search: &SearchArgs, path: Option<PathBuf>) -> SearchArgs {
+    match path {
+        Some(p) => with_root(search, p),
+        None => search.clone(),
+    }
+}
+
+/// Drop the user-scope roots (`~/.claude/skills` et al.) when `--no-user` is set, so a project/dir scan
+/// does not mix in the developer's personal skills. Project, system, and `--dir` roots are untouched.
+fn without_user(mut roots: Vec<SearchRoot>, no_user: bool) -> Vec<SearchRoot> {
+    if no_user {
+        roots.retain(|r| r.scope != Scope::User);
+    }
+    roots
+}
+
 pub fn run(args: SkillsArgs, format: Format, h: Human) -> Result<ExitCode, Diagnostic> {
     match args.command {
         Some(SkillsCmd::List(list_args)) => {
-            list(&list_args.search, list_args.presentation(), format, h)?;
+            let form = list_args.presentation();
+            let search = with_positional(&list_args.search, list_args.path);
+            list(&search, form, format, h)?;
             Ok(ExitCode::SUCCESS)
         }
         Some(SkillsCmd::Show { name, search }) => {
             show(&name, &search, format, h)?;
             Ok(ExitCode::SUCCESS)
         }
-        Some(SkillsCmd::Dirs(search)) => {
+        Some(SkillsCmd::Dirs { path, search }) => {
+            let search = with_positional(&search, path);
             dirs(&search, format, h)?;
             Ok(ExitCode::SUCCESS)
         }
         Some(SkillsCmd::Lint {
-            name,
+            target,
             search,
             all,
             advice,
-        }) => lint(name.as_deref(), &search, all, advice, args.beta, format, h),
+        }) => lint(
+            target.as_deref(),
+            &search,
+            all,
+            advice,
+            args.beta,
+            format,
+            h,
+        ),
         None => {
             let form = if args.by_scope {
                 ListForm::ByScope
@@ -91,9 +135,11 @@ fn catalog(
             agents.push(a);
             agents.sort();
         }
-        build_for(&plan_for(&env, &agents, &search.dirs), &agents)
+        let roots = without_user(plan_for(&env, &agents, &search.dirs), search.no_user);
+        build_for(&roots, &agents)
     } else {
-        build(&plan(&env, &search.dirs))
+        let roots = without_user(plan(&env, &search.dirs), search.no_user);
+        build(&roots)
     };
     for r in cat
         .roots
@@ -274,7 +320,13 @@ fn collect_diagnostics(skills: &[&Skill]) -> Vec<Diagnostic> {
                 (Some(line), None) => format!("{path}:{line}"),
                 _ => path.to_string(),
             };
-            out.push(d.context(location).cause(p.message.clone()).help(p.fix));
+            // what = title (label), why = the impact, fix = help. The specific message leads the
+            // cause, the registry's `why` states why it matters.
+            out.push(
+                d.context(location)
+                    .cause(format!("{}; {}", p.message, p.why))
+                    .help(p.fix),
+            );
         }
 
         let spec_lint: Vec<&Problem> = s
@@ -292,9 +344,9 @@ fn collect_diagnostics(skills: &[&Skill]) -> Vec<Diagnostic> {
                 .cause(
                     spec_lint
                         .iter()
-                        .map(|p| p.message.as_str())
+                        .map(|p| format!("{}; {}", p.message, p.why))
                         .collect::<Vec<_>>()
-                        .join("; "),
+                        .join(" | "),
                 )
                 .help(unique_fixes(spec_lint.iter().map(|p| p.fix))),
             );
@@ -827,7 +879,7 @@ fn show_report(s: &Skill) -> Report {
 }
 
 fn lint(
-    name: Option<&str>,
+    target: Option<&str>,
     search: &SearchArgs,
     all: bool,
     advice: bool,
@@ -835,6 +887,13 @@ fn lint(
     format: Format,
     h: Human,
 ) -> Result<ExitCode, Diagnostic> {
+    // A path-like target (`.`, `./x`, `../p`, `/abs`) is a scan root (lint that directory/project); a
+    // bare word is a skill-name filter (lint that one skill).
+    let (search_owned, name): (SearchArgs, Option<&str>) = match target {
+        Some(t) if is_path_like(t) => (with_root(search, PathBuf::from(t)), None),
+        other => (search.clone(), other),
+    };
+    let search = &search_owned;
     let cat = catalog(search, format, true)?;
     let candidates = selected(&cat, search);
     let skills: Vec<&Skill> = match name {
@@ -889,7 +948,7 @@ fn lint(
     // Result first: print the table on stdout so a reader sees the overview before the issues.
     // `--advice` adds a fix-advice table (also a stdout result: it is the requested fix plan, per
     // SPEC-0001 OUT) classing each issue auto / assisted / manual, writing nothing.
-    let mut report = Report::new().table("skills", lint_table(&skills));
+    let mut report = Report::new().table("skills", lint_table(&skills, beta));
     if advice {
         report = report.table("advice", advice_table(&fix::plan_advice(&skills)));
     }
@@ -929,7 +988,7 @@ fn lint(
 /// Cap on urgent issues shown after the table before the summary suggests `--all`.
 const ISSUE_LIMIT: usize = 5;
 
-fn lint_table(skills: &[&Skill]) -> Table {
+fn lint_table(skills: &[&Skill], beta: bool) -> Table {
     let mut t = Table::new(vec![
         Column::new("name", "NAME"),
         Column::new("scope", "SCOPE"),
@@ -942,6 +1001,13 @@ fn lint_table(skills: &[&Skill]) -> Table {
     ]);
 
     for s in skills {
+        // Beta rules (staged behind `--beta`) are hidden from the result table by default, matching
+        // how the diagnostics stream is gated; without this a per-skill beta rule would leak here.
+        let lint: Vec<&Problem> = s
+            .lint
+            .iter()
+            .filter(|p| beta || !super::rules::is_beta(p.code))
+            .collect();
         let mut codes: Vec<String> = Vec::new();
         for v in &s.agents {
             match &v.status {
@@ -958,27 +1024,37 @@ fn lint_table(skills: &[&Skill]) -> Table {
                 Status::Loaded | Status::Shadowed { .. } => {}
             }
         }
-        for p in &s.lint {
+        for p in &lint {
             if !codes.iter().any(|c| c == p.code) {
                 codes.push(p.code.to_owned());
             }
         }
+        // A frontmatter parse error (e.g. duplicate-frontmatter-key, frontmatter-invalid) otherwise
+        // surfaces only when an installed agent skips the skill; include it directly so linting a
+        // directory still flags it. Deduped: a real agent-root skill already has it from the skip above.
+        let fe = s.parsed.frontmatter_error.as_ref();
+        if let Some(p) = fe
+            && !codes.iter().any(|c| c == p.code)
+        {
+            codes.push(p.code.to_owned());
+        }
 
-        let has_error = s.lint.iter().any(Problem::is_error);
-        let has_warning = s.agents.iter().any(|v| {
-            matches!(
-                v.status,
-                Status::Skipped(_) | Status::Conflict { .. } | Status::Unknown(_)
-            )
-        }) || s
-            .lint
-            .iter()
-            .any(|p| !p.is_error() && p.kind() != ProblemKind::Spec);
+        let has_error = lint.iter().any(|p| p.is_error()) || fe.is_some_and(Problem::is_error);
+        let has_warning = fe.is_some_and(|p| !p.is_error())
+            || s.agents.iter().any(|v| {
+                matches!(
+                    v.status,
+                    Status::Skipped(_) | Status::Conflict { .. } | Status::Unknown(_)
+                )
+            })
+            || lint
+                .iter()
+                .any(|p| !p.is_error() && p.kind() != ProblemKind::Spec);
         let status = if has_error {
             Cell::toned(Tone::Fail, "error")
         } else if has_warning {
             Cell::toned(Tone::Warn, "warning")
-        } else if !s.lint.is_empty() {
+        } else if !lint.is_empty() {
             Cell::toned(Tone::Dim, "note")
         } else {
             Cell::toned(Tone::Ok, "ok")
@@ -992,7 +1068,7 @@ fn lint_table(skills: &[&Skill]) -> Table {
             codes.into(),
             s.path.clone().into(),
             s.dir().to_path_buf().into(),
-            Cell::Json(json!(s.lint)),
+            Cell::Json(json!(lint)),
         ]);
     }
     t

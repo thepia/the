@@ -5,6 +5,7 @@
 //! Relative links outside code are resolved against the skill directory to detect missing local
 //! files (`broken-link`) and path traversal outside the skill directory (`link-escapes-skill`).
 
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -30,7 +31,11 @@ pub fn check_body_links(body: &str, body_start_line: usize, skill_dir: &Path) ->
     let mut out = Vec::new();
     let canonical_skill_dir =
         fs::canonicalize(skill_dir).unwrap_or_else(|_| skill_dir.to_path_buf());
+    // This SKILL.md's own heading anchors, for validating same-file `#fragment` links.
+    let body_slugs = markdown_heading_slugs(body);
     let mut active_fence: Option<(char, usize)> = None;
+    // 1-based SKILL.md line of the currently-open fence, for the unclosed-fence report.
+    let mut fence_open_line = 0usize;
     // CommonMark indented code blocks (>= 4 columns of leading whitespace) are not fenced but still
     // code, so links inside them are not real. An indented block cannot interrupt a paragraph, so it
     // only starts after a blank line (or continues a block already in indented code).
@@ -50,6 +55,7 @@ pub fn check_body_links(body: &str, body_start_line: usize, skill_dir: &Path) ->
         }
         if let Some(fence) = parse_opening_fence(trimmed) {
             active_fence = Some(fence);
+            fence_open_line = line_num;
             prev_blank = false;
             in_indented_code = false;
             continue;
@@ -69,19 +75,44 @@ pub fn check_body_links(body: &str, body_start_line: usize, skill_dir: &Path) ->
         let prose = strip_inline_code(raw_line);
         for (link_start, raw_target) in extract_markdown_links(&prose) {
             let (angle, target) = normalize_target(raw_target);
+            // 1-based column of the link's opening `[`. `prose` is position-preserving, so its char
+            // offset equals the raw line's, and the editor opens the cursor on the link.
+            let col = prose[..link_start].chars().count() + 1;
+            // A same-file anchor `#section` must resolve to one of this SKILL.md's own headings.
+            if let Some(frag) = target.strip_prefix('#') {
+                if let Some(frag) = checkable_fragment(frag)
+                    && !body_slugs.contains(&slugify(frag))
+                {
+                    out.push(fragment_problem(
+                        raw_target, "SKILL.md", frag, line_num, col,
+                    ));
+                }
+                continue;
+            }
             if should_ignore_target(target) {
                 continue;
             }
+            let fragment = fragment_of(target).and_then(checkable_fragment);
             let Some(clean_path) = local_path(strip_fragment_and_query(target), angle) else {
                 continue;
             };
             if clean_path.is_empty() {
                 continue;
             }
-            // 1-based column of the link's opening `[`. `prose` is position-preserving, so its char
-            // offset equals the raw line's, and the editor opens the cursor on the link.
-            let col = prose[..link_start].chars().count() + 1;
             let rel_path = Path::new(clean_path);
+            if rel_path.is_absolute() || clean_path.starts_with("~/") {
+                out.push(
+                    Problem::new(
+                        "non-portable-path",
+                        format!(
+                            "link `{raw_target}` at SKILL.md line {line_num} is an absolute path; it will not resolve on another machine"
+                        ),
+                    )
+                    .at_line(line_num)
+                    .at_column(col),
+                );
+                continue;
+            }
             let Some(lexical_target) = resolve_within(&canonical_skill_dir, rel_path) else {
                 out.push(
                     Problem::new(
@@ -121,8 +152,33 @@ pub fn check_body_links(body: &str, body_start_line: usize, skill_dir: &Path) ->
                     .at_line(line_num)
                     .at_column(col),
                 );
+                continue;
+            }
+            // The file exists and is in-skill; if the link carries a `#fragment` and points at a
+            // Markdown file, that anchor must resolve to one of the target's headings.
+            if let Some(frag) = fragment
+                && is_markdown(&lexical_target)
+                && let Ok(target_md) = fs::read_to_string(&lexical_target)
+                && !markdown_heading_slugs(&target_md).contains(&slugify(frag))
+            {
+                out.push(fragment_problem(
+                    raw_target, clean_path, frag, line_num, col,
+                ));
             }
         }
+    }
+
+    // A fence that opened but never closed swallows the rest of the skill as code.
+    if active_fence.is_some() {
+        out.push(
+            Problem::new(
+                "unclosed-code-fence",
+                format!(
+                    "code fence opened at SKILL.md line {fence_open_line} is never closed; everything after it is read as code"
+                ),
+            )
+            .at_line(fence_open_line),
+        );
     }
 
     out
@@ -341,6 +397,131 @@ fn strip_fragment_and_query(target: &str) -> &str {
         .trim()
 }
 
+/// The `#fragment` of a link target (after any `?query`), without the leading `#`, or `None`.
+fn fragment_of(target: &str) -> Option<&str> {
+    target.split_once('#').map(|(_, frag)| frag)
+}
+
+/// A fragment worth checking, or `None` to skip. We skip empty fragments and any that still carry a
+/// template marker (`{`, `}`, `$`) or a `%`-escape, where our plain slug comparison would be unsound.
+fn checkable_fragment(frag: &str) -> Option<&str> {
+    let frag = frag.trim();
+    if frag.is_empty() || frag.contains(['{', '}', '$', '%']) {
+        return None;
+    }
+    Some(frag)
+}
+
+fn is_markdown(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("md") | Some("markdown") | Some("mdown") | Some("mkd")
+    )
+}
+
+/// GitHub-style heading anchor slug: lowercase, drop punctuation other than hyphen/underscore,
+/// spaces to hyphens. Matches the anchor GitHub/CommonMark renderers generate for a heading.
+fn slugify(text: &str) -> String {
+    let mut s = String::new();
+    for c in text.trim().chars() {
+        if c.is_alphanumeric() {
+            s.extend(c.to_lowercase());
+        } else if c == ' ' || c == '\t' {
+            s.push('-');
+        } else if c == '-' || c == '_' {
+            s.push(c);
+        }
+        // Any other punctuation (`,`, `.`, `:`, emoji, ...) is dropped, as GitHub does.
+    }
+    s
+}
+
+/// The set of anchor slugs for every ATX heading in `md`, fence-aware (headings inside code fences
+/// do not produce anchors). Duplicate headings get GitHub's `-1`, `-2`, ... disambiguators.
+fn markdown_heading_slugs(md: &str) -> HashSet<String> {
+    let mut slugs = HashSet::new();
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut active_fence: Option<(char, usize)> = None;
+
+    for raw in md.lines() {
+        let trimmed = raw.trim_start();
+        if let Some((ch, len)) = active_fence {
+            if is_closing_fence(trimmed, ch, len) {
+                active_fence = None;
+            }
+            continue;
+        }
+        if let Some(fence) = parse_opening_fence(trimmed) {
+            active_fence = Some(fence);
+            continue;
+        }
+        // ATX heading: 1-6 leading `#` then a space (an indented code block cannot start a heading,
+        // but a heading may be indented up to 3 spaces, which `trim_start` already tolerates).
+        let hashes = trimmed.chars().take_while(|&c| c == '#').count();
+        if (1..=6).contains(&hashes) && trimmed[hashes..].starts_with(' ') {
+            let text = heading_text(&trimmed[hashes..]);
+            let base = slugify(&text);
+            if base.is_empty() {
+                continue;
+            }
+            let n = counts.entry(base.clone()).or_insert(0);
+            let slug = if *n == 0 {
+                base.clone()
+            } else {
+                format!("{base}-{n}")
+            };
+            *n += 1;
+            slugs.insert(slug);
+        }
+    }
+    slugs
+}
+
+/// Heading display text for slugging: strip a trailing ` ###` closer, inline-code backticks, and
+/// reduce `[label](url)` links to their label, so the slug matches the rendered anchor.
+fn heading_text(after_hashes: &str) -> String {
+    let mut t = after_hashes.trim().to_string();
+    // Drop an optional closing sequence of `#` (ATX closed form).
+    t = t.trim_end_matches(['#', ' ']).to_string();
+    t = t.replace('`', "");
+    // `[label](url)` -> `label`.
+    let mut out = String::with_capacity(t.len());
+    let bytes = t.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'['
+            && let Some(close) = t[i..].find(']')
+            && t[i + close..].starts_with("](")
+            && let Some(paren) = t[i + close..].find(')')
+        {
+            out.push_str(&t[i + 1..i + close]);
+            i += close + paren + 1;
+            continue;
+        }
+        let ch = t[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+fn fragment_problem(
+    raw_target: &str,
+    target_label: &str,
+    frag: &str,
+    line_num: usize,
+    col: usize,
+) -> Problem {
+    Problem::new(
+        "broken-link-fragment",
+        format!(
+            "link `{raw_target}` at SKILL.md line {line_num}: `{target_label}` has no heading matching anchor `#{frag}`"
+        ),
+    )
+    .at_line(line_num)
+    .at_column(col)
+}
+
 /// Lexically resolve `rel` against `skill_dir`, returning `None` if `rel` escapes `skill_dir`.
 fn resolve_within(skill_dir: &Path, rel: &Path) -> Option<PathBuf> {
     if rel.is_absolute() {
@@ -438,9 +619,26 @@ mod tests {
     }
 
     #[test]
+    fn absolute_path_links_are_non_portable() {
+        let sk = TempSkill::new();
+        let body = "\
+[home](/Users/me/notes/guide.md) and [tilde](~/notes/guide.md) and [rel](references/x.md)
+";
+        let codes: Vec<&str> = check_body_links(body, 1, &sk.dir)
+            .iter()
+            .map(|p| p.code)
+            .collect();
+        // The two absolute targets are non-portable; the relative one is just a broken link.
+        assert_eq!(
+            codes,
+            ["non-portable-path", "non-portable-path", "broken-link"]
+        );
+    }
+
+    #[test]
     fn skips_fenced_and_inline_code_and_checks_real_links() {
         let sk = TempSkill::new();
-        sk.write("references/guide.md", "# Guide\n");
+        sk.write("references/guide.md", "# Guide\n\n## Overview\n");
         sk.write("scripts/run.sh", "#!/bin/sh\n");
 
         let doc = "\
@@ -452,7 +650,7 @@ description: Demo skill
 # Demo
 
 Valid links: [guide](references/guide.md#overview) and [script](scripts/run.sh?mode=fast).
-External and anchor links: [web](https://example.com/a) [mail](mailto:a@b.c) [sec](#intro) [file](file:///tmp/x) [mdc](mdc:rule) [conv](conversation://123).
+External and anchor links: [web](https://example.com/a) [mail](mailto:a@b.c) [sec](#demo) [file](file:///tmp/x) [mdc](mdc:rule) [conv](conversation://123).
 Inline code ignored: `[ghost](missing-inline.md)` and ``[ghost2](missing-inline-2.md)``.
 
 ```markdown
@@ -521,6 +719,84 @@ Example:
         assert!(
             check_links(&parse(doc), &sk.dir).is_empty(),
             "links inside a 4-space indented code block must be ignored"
+        );
+    }
+
+    #[test]
+    fn unclosed_code_fence_is_flagged_at_the_opening_line() {
+        let sk = TempSkill::new();
+        let doc = "\
+---
+name: a
+description: d
+---
+
+# Demo
+
+```sh
+echo hello
+";
+        let problems = check_links(&parse(doc), &sk.dir);
+        let p = problems
+            .iter()
+            .find(|p| p.code == "unclosed-code-fence")
+            .unwrap_or_else(|| panic!("expected unclosed-code-fence, got {problems:?}"));
+        // The ``` opens on SKILL.md line 8 (4 frontmatter lines + blank + heading + blank + fence).
+        assert_eq!(p.line, Some(8), "{p:?}");
+    }
+
+    #[test]
+    fn link_fragments_are_validated_against_target_headings() {
+        let sk = TempSkill::new();
+        sk.write(
+            "references/guide.md",
+            "# Guide\n\n## Set Up\n\nText.\n\n## Set Up\n\nDup heading.\n\n```\n## In Code\n```\n",
+        );
+        let body = "\
+Good cross-file: [a](references/guide.md#set-up) and dup [b](references/guide.md#set-up-1).
+Bad cross-file: [c](references/guide.md#missing) and fenced [d](references/guide.md#in-code).
+Same-file good: [e](#overview). Same-file bad: [f](#nope).
+
+# Overview
+";
+        let codes: Vec<(&str, String)> = check_body_links(body, 1, &sk.dir)
+            .into_iter()
+            .map(|p| (p.code, p.message))
+            .collect();
+        // Two cross-file misses (#missing, #in-code) + one same-file miss (#nope). The valid
+        // anchors (#set-up, #set-up-1, #overview) and the in-code heading do not fire.
+        assert_eq!(codes.len(), 3, "{codes:?}");
+        assert!(codes.iter().all(|(c, _)| *c == "broken-link-fragment"));
+        assert!(codes[0].1.contains("#missing"), "{codes:?}");
+        assert!(codes[1].1.contains("#in-code"), "{codes:?}");
+        assert!(codes[2].1.contains("#nope"), "{codes:?}");
+    }
+
+    #[test]
+    fn fragments_on_non_markdown_or_templated_targets_are_skipped() {
+        let sk = TempSkill::new();
+        sk.write("scripts/run.sh", "#!/bin/sh\n");
+        let body = "\
+[sh](scripts/run.sh#L10) [tpl](references/x.md#{{name}}) [ext](https://example.com/a#frag)
+";
+        // A `.sh` anchor, a templated fragment, and an external URL anchor are all out of scope.
+        assert!(
+            check_body_links(body, 1, &sk.dir)
+                .iter()
+                .all(|p| p.code != "broken-link-fragment"),
+            "non-markdown / templated / external fragments must not be checked"
+        );
+    }
+
+    #[test]
+    fn a_closed_fence_is_not_flagged_unclosed() {
+        let sk = TempSkill::new();
+        let doc = "---\nname: a\ndescription: d\n---\n\n```sh\necho hi\n```\n";
+        assert!(
+            check_links(&parse(doc), &sk.dir)
+                .iter()
+                .all(|p| p.code != "unclosed-code-fence"),
+            "a closed fence must not be reported as unclosed"
         );
     }
 }
