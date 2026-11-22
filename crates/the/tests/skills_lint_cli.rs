@@ -159,3 +159,26 @@ fn a_clean_skill_has_no_beta_findings() {
     // Guard the helper itself against a silent miss: the clean skill really is discovered.
     let _ = Path::new(env!("CARGO_BIN_EXE_the"));
 }
+
+#[test]
+fn claude_code_field_validity_fires_through_the_cli() {
+    // The agent-field-validity family is default-stability, so it must surface WITHOUT --beta through
+    // the real command path. This guards against a stale local binary shipping old field-check logic
+    // (a recurring build-cache gotcha the unit tests cannot see).
+    let fx = Fixture::new();
+    fx.write(
+        "fields/SKILL.md",
+        "---\nname: fields\ndescription: a clear useful tool for splitting PDFs by page\nshell: fish\nbackground: true\ndisallowed-tools: 42\n---\n\n# Fields\n\nBody.\n",
+    );
+    let codes = fx.lint_codes("fields", false);
+    for code in [
+        "shell-invalid",
+        "background-without-context",
+        "list-field-invalid",
+    ] {
+        assert!(
+            codes.contains(&code.to_string()),
+            "{code} must surface through the CLI by default: {codes:?}"
+        );
+    }
+}

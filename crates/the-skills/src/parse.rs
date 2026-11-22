@@ -34,6 +34,18 @@ const DESCRIPTION_TERSE_MAX: usize = 40;
 /// them would flag valid skills. Re-check when Claude Code changes these.
 const EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 const BOOL_FIELDS: &[&str] = &["disable-model-invocation", "user-invocable", "background"];
+/// Closed value set for the Claude Code `shell` field (code.claude.com/docs/en/skills, checked
+/// 2026-11-22): the shell that runs `!` commands, or `0` to turn the shell tool off.
+const SHELL_VALUES: &[&str] = &["bash", "powershell", "0"];
+/// Frontmatter fields whose value is a space/comma-delimited string OR a list of strings, each paired
+/// with the lint code to emit when it is neither. One table drives the check so a new such field is a
+/// row, not another ad-hoc match (the metadata-table principle).
+const STRING_OR_LIST_FIELDS: &[(&str, &str)] = &[
+    ("allowed-tools", "allowed-tools-invalid"),
+    ("disallowed-tools", "list-field-invalid"),
+    ("paths", "list-field-invalid"),
+    ("arguments", "list-field-invalid"),
+];
 
 /// Portable top-level keys defined by the Agent Skills (agentskills.io) specification.
 const SPEC_KEYS: &[&str] = &[
@@ -293,6 +305,25 @@ fn is_boolean_like(v: &Value) -> bool {
             s.to_ascii_lowercase().as_str(),
             "yes" | "no" | "on" | "off" | "true" | "false" | "1" | "0"
         ),
+        _ => false,
+    }
+}
+
+/// A `shell` value in the closed set `{bash, powershell, 0}`. `0` may parse as the integer `0` or the
+/// string `"0"`, so both forms are accepted.
+fn is_valid_shell(v: &Value) -> bool {
+    if let Some(s) = v.as_str() {
+        return SHELL_VALUES.contains(&s);
+    }
+    v.as_i64() == Some(0)
+}
+
+/// A value that is a single string or a list whose every element is a string (the shape Claude Code's
+/// `allowed-tools` / `disallowed-tools` / `paths` / `arguments` fields accept).
+fn is_string_or_list_of_strings(v: &Value) -> bool {
+    match v {
+        Value::String(_) => true,
+        Value::Array(items) => items.iter().all(Value::is_string),
         _ => false,
     }
 }
@@ -651,16 +682,15 @@ pub fn lint(p: &Parsed, dir_name: &str) -> Vec<Problem> {
             ));
         }
     }
-    if let Some(v) = p.frontmatter.get("allowed-tools") {
-        let valid = match v {
-            Value::String(_) => true,
-            Value::Array(items) => items.iter().all(Value::is_string),
-            _ => false,
-        };
-        if !valid {
+    for (field, code) in STRING_OR_LIST_FIELDS {
+        if let Some(v) = p.frontmatter.get(*field)
+            && !is_string_or_list_of_strings(v)
+        {
             out.push(Problem::new(
-                "allowed-tools-invalid",
-                "frontmatter `allowed-tools` must be a space-delimited string or list of strings",
+                code,
+                format!(
+                    "frontmatter `{field}` must be a space/comma-delimited string or a list of strings"
+                ),
             ));
         }
     }
@@ -724,6 +754,22 @@ pub fn lint(p: &Parsed, dir_name: &str) -> Vec<Problem> {
         out.push(Problem::new(
             "agent-without-context",
             "`agent` is only used by a forked skill; add `context: fork` or remove `agent`",
+        ));
+    }
+    if p.frontmatter.contains_key("background")
+        && p.frontmatter.get("context").and_then(Value::as_str) != Some("fork")
+    {
+        out.push(Problem::new(
+            "background-without-context",
+            "`background` only applies to a forked skill; add `context: fork` or remove `background`",
+        ));
+    }
+    if let Some(v) = p.frontmatter.get("shell")
+        && !is_valid_shell(v)
+    {
+        out.push(Problem::new(
+            "shell-invalid",
+            "`shell` must be `bash`, `powershell`, or `0` (to turn the shell tool off)",
         ));
     }
     for field in BOOL_FIELDS {
@@ -895,6 +941,30 @@ mod tests {
             assert!(
                 !l(&format!("user-invocable: {good}")).contains(&"non-boolean-field"),
                 "`{good}` is a valid boolean form"
+            );
+        }
+        // background, like agent, only applies with context: fork.
+        assert!(l("background: true").contains(&"background-without-context"));
+        assert!(!l("context: fork\nbackground: true").contains(&"background-without-context"));
+        // shell: closed set {bash, powershell, 0}; `0` may be an int or a string.
+        assert!(l("shell: fish").contains(&"shell-invalid"));
+        assert!(!l("shell: bash").contains(&"shell-invalid"));
+        assert!(!l("shell: powershell").contains(&"shell-invalid"));
+        assert!(!l("shell: 0").contains(&"shell-invalid"));
+        assert!(!l("shell: \"0\"").contains(&"shell-invalid"));
+        // disallowed-tools / paths / arguments: string or list of strings, else list-field-invalid.
+        for field in ["disallowed-tools", "paths", "arguments"] {
+            assert!(
+                l(&format!("{field}: 42")).contains(&"list-field-invalid"),
+                "`{field}: 42` (a scalar number) must be flagged"
+            );
+            assert!(
+                !l(&format!("{field}: \"a, b\"")).contains(&"list-field-invalid"),
+                "`{field}` as a string is valid"
+            );
+            assert!(
+                !l(&format!("{field}:\n  - a\n  - b")).contains(&"list-field-invalid"),
+                "`{field}` as a list of strings is valid"
             );
         }
     }
