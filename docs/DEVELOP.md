@@ -111,8 +111,8 @@ crates/the/
 ### Adding a subcommand
 1. Define the subcommand variant and arguments in [`src/cli.rs`](../crates/the/src/cli.rs) under
    `enum Command`.
-2. Create a module `src/<subcommand>/` that builds a [`table::Report`](../crates/the/src/table.rs) and
-   emits any [`Diagnostic`](../crates/the/src/diag.rs)s via `diag.emit(format)`.
+2. Create a module `src/<subcommand>/` that builds a [`table::Report`](../crates/the-output/src/table.rs) and
+   emits any [`Diagnostic`](../crates/the-output/src/diag.rs)s via `diag.emit(format)`.
 3. Wire the variant in [`src/lib.rs`](../crates/the/src/lib.rs).
 4. Add hermetic integration tests in `crates/the/tests/` covering both human and `--format json` output,
    diagnostics on `stderr`, and exit codes.
@@ -122,7 +122,7 @@ crates/the/
 `the` follows strict output discipline: `stdout` carries only the result, `stderr` carries diagnostics,
 one global `--format human|json` governs both, and errors are rustc-style (what / why / fix) with stable
 kebab codes and semantic exit codes. Commands build a declarative
-[`Report`](../crates/the/src/table.rs) rather than printing directly, so formatting stays uniform. Keep
+[`Report`](../crates/the-output/src/table.rs) rather than printing directly, so formatting stays uniform. Keep
 new commands consistent with the existing ones.
 
 ## CI gates

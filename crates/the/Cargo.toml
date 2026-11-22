@@ -21,7 +21,8 @@ name = "th"
 path = "src/bin/th.rs"
 
 [dependencies]
-anstyle.workspace = true
+the-output = { path = "../the-output", version = "0.1.2" }
+the-skills = { path = "../the-skills", version = "0.1.2" }
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true

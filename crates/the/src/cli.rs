@@ -41,6 +41,11 @@ pub struct SkillsArgs {
     #[arg(long)]
     pub by_scope: bool,
 
+    /// (beta) Expand beta-gated detail across the skills subcommands: run the experimental lint rules
+    /// still staged behind `--beta` in the rule registry. For corpus-quality evaluation.
+    #[arg(long, global = true)]
+    pub beta: bool,
+
     #[command(subcommand)]
     pub command: Option<SkillsCmd>,
 }
@@ -67,6 +72,9 @@ pub enum SkillsCmd {
         /// Show every issue, not just the 5 most urgent.
         #[arg(long)]
         all: bool,
+        /// Recommend a fix approach per issue, classed auto / assisted / manual (writes nothing).
+        #[arg(long)]
+        advice: bool,
     },
 }
 

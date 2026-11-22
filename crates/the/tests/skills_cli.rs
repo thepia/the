@@ -7,6 +7,22 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::Value;
 
+/// Run a command, retrying on Linux `ETXTBSY` (errno 26). A binary copied moments earlier can briefly
+/// report "text file busy" before the writing fd is fully released by the kernel; macOS does not
+/// exhibit this, so the test is otherwise identical across platforms.
+fn output_retrying_busy(cmd: &mut Command) -> Output {
+    for _ in 0..50 {
+        match cmd.output() {
+            Ok(o) => return o,
+            Err(e) if e.raw_os_error() == Some(26) => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(e) => panic!("exec failed: {e}"),
+        }
+    }
+    panic!("command still ETXTBSY after retries");
+}
+
 struct Sandbox {
     base: PathBuf,
 }
@@ -447,7 +463,7 @@ fn show_unknown_skill_exits_not_found_with_a_suggestion() {
         err.starts_with("error[skill-not-found]: no skill named `pdf`\n"),
         "{err}"
     );
-    assert!(err.contains("= help: did you mean `pdf-tools`?"), "{err}");
+    assert!(err.contains("help: did you mean `pdf-tools`?"), "{err}");
 }
 
 #[test]
@@ -597,14 +613,13 @@ fn alternate_command_names_the_thepia_and_th_all_work() {
 
         for name in ["thepia", "the", "th"] {
             let exe = pkg_bin.join(name);
-            let out = Command::new(&exe)
-                .args(["skills", "list"])
+            let mut cmd = Command::new(&exe);
+            cmd.args(["skills", "list"])
                 .current_dir(sb.work())
                 .env("HOME", sb.home())
                 .env("PATH", sb.bin())
-                .env("CLAUDE_CODE_DISABLE_POLICY_SKILLS", "1")
-                .output()
-                .unwrap();
+                .env("CLAUDE_CODE_DISABLE_POLICY_SKILLS", "1");
+            let out = output_retrying_busy(&mut cmd);
             assert!(
                 out.status.success(),
                 "{name} symlink failed: {}",
@@ -819,4 +834,39 @@ fn documented_claude_code_frontmatter_keys_are_not_unknown() {
         })
         .collect();
     assert!(unknown.is_empty(), "{unknown:?}");
+}
+
+#[test]
+fn beta_corpus_rules_are_gated_behind_the_flag() {
+    let sb = Sandbox::new();
+    // Two near-duplicate skills (descriptions differ by one word) -> a `redundant-with` candidate.
+    sb.skill(
+        &sb.home().join(".claude/skills/crawl-one"),
+        &md(
+            "crawl-one",
+            "Crawl a website directory and extract the structured profile json data for each scraped page",
+        ),
+    );
+    sb.skill(
+        &sb.home().join(".claude/skills/crawl-two"),
+        &md(
+            "crawl-two",
+            "Crawl a website directory and extract the structured profile json data for every scraped page",
+        ),
+    );
+
+    // Default: the corpus (beta) rule is staged behind `--beta`, so it is NOT reported.
+    let base = diags(&sb.run(&["--format", "json", "skills", "lint"]));
+    assert!(
+        !base.iter().any(|d| d["code"] == "redundant-with"),
+        "redundant-with must be hidden without --beta: {base:?}"
+    );
+
+    // `--beta`: the corpus rule fires as a warning naming the counterpart skill.
+    let beta = diags(&sb.run(&["--format", "json", "skills", "lint", "--beta"]));
+    let red = beta
+        .iter()
+        .find(|d| d["code"] == "redundant-with")
+        .unwrap_or_else(|| panic!("redundant-with must appear with --beta: {beta:?}"));
+    assert_eq!(red["level"], "warning", "{red:?}");
 }

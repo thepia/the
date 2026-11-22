@@ -13,8 +13,8 @@
 use std::fs;
 use std::path::Path;
 
-use super::SKILL_FILE;
-use super::parse::{Parsed, Problem, allowed_tools};
+use crate::SKILL_FILE;
+use crate::parse::{Parsed, Problem, allowed_tools};
 
 const SECRET_PREFIXES: &[&str] = &[
     "sk-ant-api03-",
@@ -151,13 +151,17 @@ fn check_trojan_source(raw_text: &str, out: &mut Vec<Problem>) {
                 continue;
             }
             if is_trojan_unicode(ch) || is_terminal_control(ch) {
-                out.push(Problem::new(
-                    "trojan-source",
-                    format!(
-                        "hidden control or bidirectional character U+{:04X} at SKILL.md line {line_num} column {col}",
-                        ch as u32
-                    ),
-                ));
+                out.push(
+                    Problem::new(
+                        "trojan-source",
+                        format!(
+                            "hidden control or bidirectional character U+{:04X} at SKILL.md line {line_num} column {col}",
+                            ch as u32
+                        ),
+                    )
+                    .at_line(line_num)
+                    .at_column(col),
+                );
             }
         }
     }
@@ -174,10 +178,14 @@ fn check_exposed_secrets(raw_text: &str, out: &mut Vec<Problem>) {
                 let next_line = lines.get(idx + 1).copied().unwrap_or("").trim();
                 let sample = if !after.is_empty() { after } else { next_line };
                 if !is_private_key_placeholder(sample) {
-                    out.push(Problem::new(
-                        "exposed-secret",
-                        format!("private key header `{header}` at SKILL.md line {line_num}"),
-                    ));
+                    out.push(
+                        Problem::new(
+                            "exposed-secret",
+                            format!("private key header `{header}` at SKILL.md line {line_num}"),
+                        )
+                        .at_line(line_num)
+                        .at_column(line[..pos].chars().count() + 1),
+                    );
                 }
                 break;
             }
@@ -204,10 +212,14 @@ fn check_exposed_secrets(raw_text: &str, out: &mut Vec<Problem>) {
                     .collect();
 
                 if is_live_shaped_token(prefix, &suffix) {
-                    out.push(Problem::new(
-                        "exposed-secret",
-                        format!("credential literal `{prefix}...` at SKILL.md line {line_num}"),
-                    ));
+                    out.push(
+                        Problem::new(
+                            "exposed-secret",
+                            format!("credential literal `{prefix}...` at SKILL.md line {line_num}"),
+                        )
+                        .at_line(line_num)
+                        .at_column(line[..pos].chars().count() + 1),
+                    );
                 }
             }
         }
@@ -290,7 +302,7 @@ fn is_unrestricted_bash(grant: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::skills::parse::parse;
+    use crate::parse::parse;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
 

@@ -252,13 +252,35 @@ dependencies = [
 ]
 
 [[package]]
-name = "thepia"
-version = "0.1.1"
+name = "the-output"
+version = "0.1.2"
 dependencies = [
  "anstyle",
  "clap",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "the-skills"
+version = "0.1.2"
+dependencies = [
+ "clap",
+ "serde",
+ "serde_json",
+ "unicode-normalization",
+ "yaml-rust2",
+]
+
+[[package]]
+name = "thepia"
+version = "0.1.2"
+dependencies = [
+ "clap",
+ "serde",
+ "serde_json",
+ "the-output",
+ "the-skills",
  "unicode-normalization",
  "yaml-rust2",
 ]

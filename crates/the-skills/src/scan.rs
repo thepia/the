@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use super::SKILL_FILE;
-use super::locate::{Depth, Hidden, SearchRoot};
+use crate::SKILL_FILE;
+use crate::locate::{Depth, Hidden, SearchRoot};
 
 /// A symlink on the way to something: the link itself and the directory it resolves to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -120,7 +120,7 @@ fn walk(dir: &Path, hidden: Hidden, visited: &mut HashSet<PathBuf>, out: &mut Ve
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::skills::Scope;
+    use crate::Scope;
 
     fn tmp(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("the-scan-{tag}-{}", std::process::id()));

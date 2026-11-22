@@ -25,7 +25,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use super::{Agent, Scope};
+use crate::{Agent, Scope};
 
 /// The environment discovery runs in, captured once so it can be tested without touching the process.
 #[derive(Debug, Clone)]

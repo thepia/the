@@ -111,6 +111,8 @@ pub const GLYPH_WARN: &str = "[!]";
 pub const GLYPH_FAIL: &str = "[✗]";
 /// Solid triangle indicator (`▲`) for inline issue highlighting and issue summary counts.
 pub const GLYPH_ISSUE: &str = "▲";
+/// Document/page indicator (`📄`, U+1F4C4) marking a diagnostic's source location (`<glyph> path:line:col`).
+pub const GLYPH_FILE: &str = "\u{1F4C4}";
 
 /// Does the terminal advertise 24-bit truecolor? Only then do we use the exact brand lavender;
 /// otherwise the brand accent degrades to ANSI magenta (the nearest base), per the style guide.

@@ -9,7 +9,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use super::parse::{Parsed, Problem};
+use crate::parse::{Parsed, Problem};
 
 const EXTERNAL_SCHEMES: &[&str] = &[
     "http://",
@@ -67,7 +67,7 @@ pub fn check_body_links(body: &str, body_start_line: usize, skill_dir: &Path) ->
         prev_blank = false;
 
         let prose = strip_inline_code(raw_line);
-        for raw_target in extract_markdown_links(&prose) {
+        for (link_start, raw_target) in extract_markdown_links(&prose) {
             let (angle, target) = normalize_target(raw_target);
             if should_ignore_target(target) {
                 continue;
@@ -78,34 +78,49 @@ pub fn check_body_links(body: &str, body_start_line: usize, skill_dir: &Path) ->
             if clean_path.is_empty() {
                 continue;
             }
+            // 1-based column of the link's opening `[`. `prose` is position-preserving, so its char
+            // offset equals the raw line's, and the editor opens the cursor on the link.
+            let col = prose[..link_start].chars().count() + 1;
             let rel_path = Path::new(clean_path);
             let Some(lexical_target) = resolve_within(&canonical_skill_dir, rel_path) else {
-                out.push(Problem::new(
-                    "link-escapes-skill",
-                    format!(
-                        "link `{raw_target}` at SKILL.md line {line_num} resolves outside the skill directory"
-                    ),
-                ));
+                out.push(
+                    Problem::new(
+                        "link-escapes-skill",
+                        format!(
+                            "link `{raw_target}` at SKILL.md line {line_num} resolves outside the skill directory"
+                        ),
+                    )
+                    .at_line(line_num)
+                    .at_column(col),
+                );
                 continue;
             };
             if !lexical_target.exists() {
-                out.push(Problem::new(
-                    "broken-link",
-                    format!(
-                        "broken link `{raw_target}` at SKILL.md line {line_num}: `{clean_path}` does not exist"
-                    ),
-                ));
+                out.push(
+                    Problem::new(
+                        "broken-link",
+                        format!(
+                            "broken link `{raw_target}` at SKILL.md line {line_num}: `{clean_path}` does not exist"
+                        ),
+                    )
+                    .at_line(line_num)
+                    .at_column(col),
+                );
                 continue;
             }
             if let Ok(canon_target) = fs::canonicalize(&lexical_target)
                 && !canon_target.starts_with(&canonical_skill_dir)
             {
-                out.push(Problem::new(
-                    "link-escapes-skill",
-                    format!(
-                        "link `{raw_target}` at SKILL.md line {line_num} resolves outside the skill directory"
-                    ),
-                ));
+                out.push(
+                    Problem::new(
+                        "link-escapes-skill",
+                        format!(
+                            "link `{raw_target}` at SKILL.md line {line_num} resolves outside the skill directory"
+                        ),
+                    )
+                    .at_line(line_num)
+                    .at_column(col),
+                );
             }
         }
     }
@@ -183,6 +198,12 @@ fn strip_inline_code(line: &str) -> String {
                 }
             }
             if let Some(after_close) = closed_at {
+                // Replace the whole code span with spaces (one per character) rather than dropping
+                // it, so a later link's offset in this stripped line still matches its column in the
+                // raw line. Blanking still removes any link-like text inside the span.
+                for _ in line[start..after_close].chars() {
+                    out.push(' ');
+                }
                 i = after_close;
             } else {
                 out.push_str(&line[start..i]);
@@ -197,8 +218,9 @@ fn strip_inline_code(line: &str) -> String {
     out
 }
 
-/// Extract the `target` portion of every `[label](target)` in `line`.
-fn extract_markdown_links(line: &str) -> Vec<&str> {
+/// Extract every `[label](target)` in `line` as `(link_start, target)`, where `link_start` is the
+/// byte offset of the opening `[` (used to compute the link's column).
+fn extract_markdown_links(line: &str) -> Vec<(usize, &str)> {
     let mut targets = Vec::new();
     let bytes = line.as_bytes();
     let mut i = 0;
@@ -209,6 +231,7 @@ fn extract_markdown_links(line: &str) -> Vec<&str> {
             continue;
         }
         if bytes[i] == b'[' {
+            let link_start = i;
             let mut j = i + 1;
             let mut bracket_depth = 1usize;
             while j < bytes.len() && bracket_depth > 0 {
@@ -242,7 +265,7 @@ fn extract_markdown_links(line: &str) -> Vec<&str> {
                     }
                 }
                 if paren_depth == 0 {
-                    targets.push(&line[target_start..k]);
+                    targets.push((link_start, &line[target_start..k]));
                     i = k + 1;
                     continue;
                 }
@@ -350,7 +373,7 @@ fn resolve_within(skill_dir: &Path, rel: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::skills::parse::parse;
+    use crate::parse::parse;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct TempSkill {
@@ -463,6 +486,22 @@ Sibling escape on line 22: [other](../other-skill/SKILL.md)
             problems[1].message.contains("../../etc/passwd"),
             "unexpected escape message: {}",
             problems[1].message
+        );
+    }
+
+    #[test]
+    fn reports_accurate_line_and_column_including_after_inline_code() {
+        let sk = TempSkill::new();
+        // The escaping link's `[` is at column 24 of this body line (1-based), after an inline-code
+        // span. Position-preserving stripping must keep that column correct.
+        let body = "Prefix `code span here` [bad](../../escape.md)\n";
+        let p = &check_body_links(body, 7, &sk.dir)[0];
+        assert_eq!(p.code, "link-escapes-skill");
+        assert_eq!(p.line, Some(7));
+        assert_eq!(
+            p.col,
+            Some(25),
+            "column of the `[` must account for the inline-code span"
         );
     }
 

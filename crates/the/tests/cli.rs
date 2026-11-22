@@ -218,3 +218,92 @@ fn skills_lint_reports_errors_and_warnings_in_human_and_json_and_exits_one() {
     assert_eq!(stderr_diags[1]["level"], "error");
     assert_eq!(stderr_diags[1]["code"], "exposed-secret");
 }
+
+#[test]
+fn skills_lint_advice_classes_each_issue_and_never_fabricates() {
+    let sb = Sandbox::new();
+    let root = sb.home().join(".claude/skills");
+    // name: PDF in directory `pdf` → name-format (auto: pure capitalisation) + name-mismatch (assisted).
+    sb.skill(
+        &root.join("pdf"),
+        "---\nname: PDF\ndescription: Extract tables from PDF files. Use when working with PDFs.\n---\n\nBody.\n",
+    );
+    // Over-long description → manual (a description is never fabricated or auto-truncated).
+    let long = "x".repeat(1100);
+    sb.skill(
+        &root.join("docs"),
+        &format!("---\nname: docs\ndescription: {long}\n---\n\nBody.\n"),
+    );
+    // Unrestricted Bash grant → manual (a security finding).
+    sb.skill(
+        &root.join("runner"),
+        "---\nname: runner\ndescription: Runs commands.\nallowed-tools: Bash(*)\n---\n\nBody.\n",
+    );
+
+    // JSON: the `advice` array carries a structured object per issue a coding agent can branch on.
+    let o = sb.run(&["skills", "lint", "--advice", "--format", "json"]);
+    assert_eq!(o.status.code(), Some(1), "stderr: {}", stderr(&o));
+    let v = json(&o);
+    let advice = v["advice"].as_array().expect("advice array present");
+    let find = |name: &str, code: &str| {
+        advice
+            .iter()
+            .find(|a| a["name"] == name && a["code"] == code)
+            .unwrap_or_else(|| panic!("no advice for {name}/{code} in {advice:#?}"))
+    };
+
+    let pdf_fmt = find("PDF", "name-format");
+    assert_eq!(pdf_fmt["class"], "auto");
+    assert_eq!(pdf_fmt["safe"], true);
+    assert_eq!(pdf_fmt["command"], Value::Null, "no fabricated command yet");
+    assert!(
+        pdf_fmt["strategy"].as_str().unwrap().contains("`pdf`"),
+        "auto strategy names the lowercased value: {pdf_fmt:#?}"
+    );
+
+    let pdf_mismatch = find("PDF", "name-mismatch");
+    assert_eq!(pdf_mismatch["class"], "assisted");
+    assert_eq!(pdf_mismatch["safe"], false);
+
+    // No lossless mechanical fix exists for these, so they are manual, never auto.
+    for (name, code) in [
+        ("docs", "description-too-long"),
+        ("runner", "unrestricted-bash"),
+    ] {
+        let a = find(name, code);
+        assert_eq!(a["class"], "manual", "{name}/{code} must be manual");
+        assert_eq!(a["safe"], false);
+        // The description advice recommends shortening, never inventing content.
+        if code == "description-too-long" {
+            assert!(a["strategy"].as_str().unwrap().contains("shorten"));
+        }
+    }
+
+    // Human output adds the advice table (sorted safest-first) after the overview table.
+    let human = sb.run(&["skills", "lint", "--advice"]);
+    let out = stdout(&human);
+    let has_cols = |line: &str, cols: &[&str]| cols.iter().all(|c| line.contains(c));
+    assert!(
+        out.lines().any(|l| has_cols(l, &["CLASS", "CODE", "FIX"])),
+        "advice header missing:\n{out}"
+    );
+    assert!(
+        out.lines()
+            .any(|l| has_cols(l, &["PDF", "auto", "name-format", "`pdf`"])),
+        "auto row for PDF missing:\n{out}"
+    );
+    let auto_at = out.find("auto").unwrap();
+    let manual_at = out.find("manual").unwrap();
+    assert!(
+        auto_at < manual_at,
+        "advice must sort auto before manual:\n{out}"
+    );
+
+    // Without --advice there is no advice section at all.
+    let plain = sb.run(&["skills", "lint"]);
+    assert!(
+        !stdout(&plain).contains("CLASS"),
+        "no advice without the flag:\n{}",
+        stdout(&plain)
+    );
+}

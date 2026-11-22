@@ -11,12 +11,12 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use super::links::check_links;
-use super::locate::SearchRoot;
-use super::parse::{Load, Parsed, Problem, claude_alias, display_name, lint, loads, parse};
-use super::scan::{Link, link_in, scan};
-use super::smoke::check_smoke;
-use super::{Agent, Scope};
+use crate::links::check_links;
+use crate::locate::SearchRoot;
+use crate::parse::{Load, Parsed, Problem, claude_alias, display_name, lint, loads, parse};
+use crate::scan::{Link, link_in, scan};
+use crate::smoke::check_smoke;
+use crate::{Agent, Scope};
 
 /// One way a skill is reached.
 #[derive(Debug, Clone)]

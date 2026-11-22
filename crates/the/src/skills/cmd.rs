@@ -6,6 +6,8 @@ use std::process::ExitCode;
 
 use serde_json::{Value, json};
 
+use super::analysis::corpus_findings;
+use super::fix::{self, Advice, FixClass};
 use super::installed::installed_agents;
 use super::locate::{Env, plan, plan_for};
 use super::parse::{Problem, ProblemKind};
@@ -33,9 +35,12 @@ pub fn run(args: SkillsArgs, format: Format, h: Human) -> Result<ExitCode, Diagn
             dirs(&search, format, h)?;
             Ok(ExitCode::SUCCESS)
         }
-        Some(SkillsCmd::Lint { name, search, all }) => {
-            lint(name.as_deref(), &search, all, format, h)
-        }
+        Some(SkillsCmd::Lint {
+            name,
+            search,
+            all,
+            advice,
+        }) => lint(name.as_deref(), &search, all, advice, args.beta, format, h),
         None => {
             let form = if args.by_scope {
                 ListForm::ByScope
@@ -260,11 +265,16 @@ fn collect_diagnostics(skills: &[&Skill]) -> Vec<Diagnostic> {
             } else {
                 Diagnostic::warning(p.code, title)
             };
-            out.push(
-                d.context(s.path.display().to_string())
-                    .cause(p.message.clone())
-                    .help(p.fix),
-            );
+            // Point at the exact SKILL.md location when the problem has one (links, assets,
+            // security), so the context is a clickable `path:line` (or `path:line:col` when the
+            // column is precisely known), which an editor opens with the cursor there.
+            let path = s.path.display();
+            let location = match (p.line, p.col) {
+                (Some(line), Some(col)) => format!("{path}:{line}:{col}"),
+                (Some(line), None) => format!("{path}:{line}"),
+                _ => path.to_string(),
+            };
+            out.push(d.context(location).cause(p.message.clone()).help(p.fix));
         }
 
         let spec_lint: Vec<&Problem> = s
@@ -427,32 +437,8 @@ fn format_skill_paragraph(skills: &[&Skill], h: Human) -> String {
 }
 
 fn issue_label(code: &str) -> &'static str {
-    match code {
-        "no-frontmatter" => "missing YAML frontmatter",
-        "frontmatter-unterminated" => "unterminated YAML frontmatter",
-        "frontmatter-invalid" => "invalid YAML frontmatter",
-        "name-missing" => "missing skill name",
-        "name-has-slash" => "skill name contains '/'",
-        "description-not-string" => "non-string description",
-        "symlink-escape" => "symlink escapes skill directory",
-        "trojan-source" => "hidden control or bidirectional character",
-        "exposed-secret" => "exposed secret or credential literal",
-        "skill-conflict" => "duplicate skill name conflict",
-        "broken-link" => "broken relative link in SKILL.md",
-        "link-escapes-skill" => "relative link escapes skill directory",
-        "broken-symlink" => "dangling symlink in skill directory",
-        "unrestricted-bash" => "unrestricted Bash tool permission",
-        "name-format" => "invalid skill name format",
-        "name-mismatch" => "skill name differs from directory",
-        "description-missing" => "missing description",
-        "description-too-long" => "description exceeds 1024 characters",
-        "compatibility-invalid" => "invalid or overlong compatibility field",
-        "license-not-string" => "non-string license field",
-        "metadata-not-map" => "metadata is not a flat scalar map",
-        "allowed-tools-invalid" => "invalid allowed-tools field",
-        "unknown-frontmatter-key" => "unknown frontmatter key",
-        _ => "skill format issue",
-    }
+    // Single source of truth: the rule registry (the-skills `rules`).
+    super::rules::label(code)
 }
 
 /// Build a concise summary of totals and issue counts across `skills` for prose output.
@@ -844,6 +830,8 @@ fn lint(
     name: Option<&str>,
     search: &SearchArgs,
     all: bool,
+    advice: bool,
+    beta: bool,
     format: Format,
     h: Human,
 ) -> Result<ExitCode, Diagnostic> {
@@ -881,11 +869,31 @@ fn lint(
             .emit(format);
     }
 
-    let diags = collect_diagnostics(&skills);
+    let mut diags = collect_diagnostics(&skills);
+    // Corpus-level beta rules (`redundant-with`, `superseded-by`): computed always so a graduated rule
+    // works by default, then gated on each rule's `stability` in the registry — shown only with
+    // `--beta` while still staged. Graduation is flipping one field in `the-skills::rules`.
+    for (skill_name, path, p) in corpus_findings(&skills) {
+        diags.push(
+            Diagnostic::warning(
+                p.code,
+                format!("skill `{skill_name}`: {}", issue_label(p.code)),
+            )
+            .context(path.display().to_string())
+            .cause(p.message)
+            .help(p.fix),
+        );
+    }
+    diags.retain(|d| beta || !super::rules::is_beta(d.code));
 
     // Result first: print the table on stdout so a reader sees the overview before the issues.
-    let report = Report::new()
-        .table("skills", lint_table(&skills))
+    // `--advice` adds a fix-advice table (also a stdout result: it is the requested fix plan, per
+    // SPEC-0001 OUT) classing each issue auto / assisted / manual, writing nothing.
+    let mut report = Report::new().table("skills", lint_table(&skills));
+    if advice {
+        report = report.table("advice", advice_table(&fix::plan_advice(&skills)));
+    }
+    let report = report
         .json_only("diagnostics", Block::Table(diagnostics_table(&diags)))
         .json_only("searched", Block::Table(roots_table(&cat.roots)));
     output::print(&report.render(format, h))?;
@@ -899,8 +907,10 @@ fn lint(
             }
         }
         Format::Human if !diags.is_empty() => {
-            let summary = summarize_issues(&diags, all);
-            let text = render_issue_summary(&summary, style::Term::stderr());
+            // Shared renderer (the-output): the most urgent few, then a `= status:` count line.
+            let limit = if all { None } else { Some(ISSUE_LIMIT) };
+            let text = crate::diag::summarize(&diags, limit)
+                .render(style::Term::stderr(), Some("the skills lint --all"));
             let _ = std::io::stderr().lock().write_all(text.as_bytes());
         }
         Format::Human => {}
@@ -918,98 +928,6 @@ fn lint(
 
 /// Cap on urgent issues shown after the table before the summary suggests `--all`.
 const ISSUE_LIMIT: usize = 5;
-
-/// The urgent issues to show plus counts by level. Pure (no rendering), so the selection is testable
-/// and kept separate from presentation (subcommand rule: separate computation from presentation).
-struct IssueSummary<'a> {
-    /// Diagnostics to show, ordered most-urgent first and capped unless `--all`.
-    shown: Vec<&'a Diagnostic>,
-    /// How many issues are not shown.
-    hidden: usize,
-    errors: usize,
-    warnings: usize,
-    notes: usize,
-}
-
-fn level_rank(level: Level) -> u8 {
-    match level {
-        Level::Error => 0,
-        Level::Warning => 1,
-        Level::Note => 2,
-    }
-}
-
-/// Order diagnostics by urgency (errors, then warnings, then notes), cap to [`ISSUE_LIMIT`] unless
-/// `all`, and count each level.
-fn summarize_issues(diags: &[Diagnostic], all: bool) -> IssueSummary<'_> {
-    let mut order: Vec<&Diagnostic> = diags.iter().collect();
-    order.sort_by_key(|d| level_rank(d.level));
-    let limit = if all {
-        order.len()
-    } else {
-        order.len().min(ISSUE_LIMIT)
-    };
-    let count = |lvl: Level| diags.iter().filter(|d| d.level == lvl).count();
-    IssueSummary {
-        hidden: order.len() - limit,
-        errors: count(Level::Error),
-        warnings: count(Level::Warning),
-        notes: count(Level::Note),
-        shown: order.into_iter().take(limit).collect(),
-    }
-}
-
-/// Render an [`IssueSummary`] for stderr: a blank line, the shown diagnostics (each carrying its file
-/// link and fix), an optional `--all` hint, and a colored `= status:` line counting issues by type.
-fn render_issue_summary(summary: &IssueSummary, term: style::Term) -> String {
-    // One block per issue, separated by a blank line for breathing room; the status line is the last
-    // block. Each block already ends in a newline, so joining with "\n" inserts the blank separators.
-    let mut blocks: Vec<String> = summary
-        .shown
-        .iter()
-        .map(|d| d.render(Format::Human, term))
-        .collect();
-    if summary.hidden > 0 {
-        blocks.push(
-            Diagnostic::note(
-                "more-issues",
-                format!(
-                    "{} more issue{} not shown; run `the skills lint --all` to see them",
-                    summary.hidden,
-                    if summary.hidden == 1 { "" } else { "s" }
-                ),
-            )
-            .render(Format::Human, term),
-        );
-    }
-    let plural = |n: usize| if n == 1 { "" } else { "s" };
-    let mut parts = Vec::new();
-    if summary.errors > 0 {
-        parts.push(term.paint(
-            style::FAIL.bold(),
-            &format!("{} error{}", summary.errors, plural(summary.errors)),
-        ));
-    }
-    if summary.warnings > 0 {
-        parts.push(term.paint(
-            style::WARN.bold(),
-            &format!("{} warning{}", summary.warnings, plural(summary.warnings)),
-        ));
-    }
-    if summary.notes > 0 {
-        parts.push(term.paint(
-            style::INFO,
-            &format!("{} note{}", summary.notes, plural(summary.notes)),
-        ));
-    }
-    blocks.push(format!(
-        "{} {}\n",
-        term.paint(style::DIM, "= status:"),
-        parts.join(", ")
-    ));
-    // Leading blank line separates the summary from the table; blank lines separate the blocks.
-    format!("\n{}", blocks.join("\n"))
-}
 
 fn lint_table(skills: &[&Skill]) -> Table {
     let mut t = Table::new(vec![
@@ -1075,6 +993,51 @@ fn lint_table(skills: &[&Skill]) -> Table {
             s.path.clone().into(),
             s.dir().to_path_buf().into(),
             Cell::Json(json!(s.lint)),
+        ]);
+    }
+    t
+}
+
+/// The `--advice` fix plan: one row per issue with its repair class and recommended approach. The
+/// rows are sorted safest-first (auto, then assisted, then manual) so a reader scans the mechanical
+/// wins before the judgement calls; `safe` and the (currently always-null) `command` are JSON-only so
+/// an agent can branch on them. The advice is computed by [`fix::plan_advice`]; this only renders it.
+fn advice_table(advice: &[Advice]) -> Table {
+    fn class_rank(c: FixClass) -> u8 {
+        match c {
+            FixClass::Auto => 0,
+            FixClass::Assisted => 1,
+            FixClass::Manual => 2,
+        }
+    }
+    let mut rows: Vec<&Advice> = advice.iter().collect();
+    rows.sort_by_key(|a| class_rank(a.class));
+
+    let mut t = Table::new(vec![
+        Column::new("name", "NAME"),
+        Column::new("class", "CLASS"),
+        Column::new("code", "CODE"),
+        Column::new("strategy", "FIX"),
+        Column::json_only("path"),
+        Column::json_only("safe"),
+        Column::json_only("command"),
+    ]);
+    for a in rows {
+        let tone = match a.class {
+            FixClass::Auto => Tone::Ok,
+            FixClass::Assisted => Tone::Warn,
+            FixClass::Manual => Tone::Dim,
+        };
+        t.push(vec![
+            a.skill.clone().into(),
+            Cell::toned(tone, a.class.as_str()),
+            a.code.into(),
+            a.strategy.clone().into(),
+            a.path.clone().into(),
+            Cell::Bool(a.safe()),
+            // No apply path exists yet (Phase 2 `--fix`), so there is honestly no command to name
+            // here rather than a fabricated one (the no-false-hint norm).
+            Cell::Empty,
         ]);
     }
     t

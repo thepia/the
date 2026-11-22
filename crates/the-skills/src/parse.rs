@@ -14,7 +14,7 @@ use serde_json::{Map, Value};
 use unicode_normalization::UnicodeNormalization;
 use yaml_rust2::{Yaml, YamlLoader};
 
-use super::Agent;
+use crate::Agent;
 
 const NAME_MAX: usize = 64;
 const DESCRIPTION_MAX: usize = 1024;
@@ -74,93 +74,53 @@ pub struct Problem {
     pub message: String,
     /// How to fix it.
     pub fix: &'static str,
+    /// The 1-based SKILL.md line this problem points at, when it has a source location (link, asset,
+    /// and security-smoke findings). Rendered as `SKILL.md:line` in a diagnostic and carried in JSON.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<usize>,
+    /// The 1-based column on `line` where the problem begins, when precisely known (so an editor opens
+    /// with the cursor there). Rendered as `SKILL.md:line:col`. Only set with `line`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub col: Option<usize>,
 }
 
 impl Problem {
     pub fn new(code: &'static str, message: impl Into<String>) -> Self {
-        let fix = match code {
-            "no-frontmatter" => {
-                "start SKILL.md with a `---` block holding `name:` and `description:`, closed by `---`"
-            }
-            "frontmatter-unterminated" => "close the frontmatter with a `---` line",
-            "frontmatter-invalid" => {
-                "fix the YAML; a plain value containing `: ` must be quoted (`description: \"...\"`) or use a `>-` block"
-            }
-            "name-missing" | "name-format" => {
-                "set `name:` to lowercase letters, digits and single hyphens"
-            }
-            "name-has-slash" => "remove the `/` from `name:`",
-            "name-mismatch" => "make `name:` equal the directory name, or rename the directory",
-            "description-missing" => {
-                "add a `description:` saying what the skill does and when to use it"
-            }
-            "description-not-string" => "make `description:` a plain string",
-            "description-too-long" => "shorten `description` to 1024 characters or fewer",
-            "compatibility-invalid" => {
-                "set `compatibility:` to a non-empty string of 500 characters or fewer"
-            }
-            "license-not-string" => {
-                "make `license:` a plain string (for example `MIT` or `Apache-2.0`)"
-            }
-            "metadata-not-map" => {
-                "make `metadata:` a flat YAML mapping of `key: value` scalar pairs"
-            }
-            "allowed-tools-invalid" => {
-                "set `allowed-tools:` to a space-delimited string or a list of tool strings"
-            }
-            "unknown-frontmatter-key" => {
-                "remove the unrecognized key or move custom fields under `metadata:`"
-            }
-            "broken-link" => {
-                "create the missing file or update the relative link target in SKILL.md"
-            }
-            "link-escapes-skill" => {
-                "keep linked files inside the skill directory so the skill stays self-contained"
-            }
-            "broken-symlink" => {
-                "remove the dangling symlink or point it to an existing file inside the skill directory"
-            }
-            "symlink-escape" => "replace the symlink with a file inside the skill directory",
-            "trojan-source" => {
-                "remove hidden bidirectional, zero-width, or terminal-control characters from SKILL.md"
-            }
-            "exposed-secret" => {
-                "remove the credential literal from SKILL.md and reference an environment variable instead"
-            }
-            "unrestricted-bash" => {
-                "scope `allowed-tools:` to specific commands (for example `Bash(git:*)`) instead of `Bash(*)`"
-            }
-            _ => unreachable!("every problem code has a fix: {code}"),
-        };
+        // Single source of truth: the rule registry (the-skills `rules`), not a parallel match.
+        let fix = crate::rules::rule(code)
+            .unwrap_or_else(|| unreachable!("every problem code is in the rule registry: {code}"))
+            .fix;
         Self {
             code,
             message: message.into(),
             fix,
+            line: None,
+            col: None,
         }
     }
 
+    /// Attach the 1-based SKILL.md line this problem points at (link / asset / security findings with
+    /// a source location), so a diagnostic can render a clickable `SKILL.md:line`.
+    pub fn at_line(mut self, line: usize) -> Self {
+        self.line = Some(line);
+        self
+    }
+
+    /// Attach the 1-based column where the problem begins, so an editor opens with the cursor there
+    /// (`SKILL.md:line:col`). Only meaningful together with [`Self::at_line`].
+    pub fn at_column(mut self, col: usize) -> Self {
+        self.col = Some(col);
+        self
+    }
+
     pub fn kind(&self) -> ProblemKind {
-        match self.code {
-            "no-frontmatter"
-            | "frontmatter-unterminated"
-            | "frontmatter-invalid"
-            | "name-missing"
-            | "name-has-slash"
-            | "description-not-string" => ProblemKind::Breaking,
-            "symlink-escape" | "trojan-source" | "exposed-secret" | "unrestricted-bash" => {
-                ProblemKind::Security
-            }
-            "broken-link" | "link-escapes-skill" | "broken-symlink" => ProblemKind::Asset,
-            _ => ProblemKind::Spec,
-        }
+        crate::rules::rule(self.code).map_or(ProblemKind::Spec, |r| r.kind)
     }
 
     /// True when this problem is a high-severity security hazard (`Diagnostic::error`).
     pub fn is_error(&self) -> bool {
-        matches!(
-            self.code,
-            "symlink-escape" | "trojan-source" | "exposed-secret"
-        )
+        crate::rules::rule(self.code)
+            .is_some_and(|r| matches!(r.severity, crate::rules::Severity::Error))
     }
 }
 
@@ -435,6 +395,22 @@ pub fn claude_alias(p: &Parsed) -> Option<&str> {
     }
 }
 
+/// Whether `name` satisfies the Agent Skills name format: 1-64 characters, only lowercase ASCII
+/// letters, digits and single hyphens, not starting or ending with a hyphen. Shared by the lint
+/// (`name-format`) and the fix advisor (to tell a mechanically-lowercasable name from one that needs
+/// a human-chosen replacement).
+pub fn name_format_ok(name: &str) -> bool {
+    let chars_ok = name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    !name.is_empty()
+        && name.chars().count() <= NAME_MAX
+        && chars_ok
+        && !name.starts_with('-')
+        && !name.ends_with('-')
+        && !name.contains("--")
+}
+
 /// Advisory Agent Skills format checks; only run on frontmatter that parsed.
 pub fn lint(p: &Parsed, dir_name: &str) -> Vec<Problem> {
     let mut out = Vec::new();
@@ -442,15 +418,7 @@ pub fn lint(p: &Parsed, dir_name: &str) -> Vec<Problem> {
         return out;
     }
     if let Some(n) = p.str_field("name").filter(|n| !n.is_empty()) {
-        let chars_ok = n
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
-        if n.chars().count() > NAME_MAX
-            || !chars_ok
-            || n.starts_with('-')
-            || n.ends_with('-')
-            || n.contains("--")
-        {
+        if !name_format_ok(n) {
             out.push(Problem::new(
                 "name-format",
                 format!(
