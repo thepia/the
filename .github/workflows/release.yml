@@ -94,7 +94,7 @@ jobs:
           fi
 
   gate:
-    name: Dry-run gate (fmt, clippy, test, cargo package)
+    name: Dry-run gate (fmt, clippy, test)
     needs: check
     if: needs.check.outputs.should_run == 'true'
     runs-on: ubuntu-latest
@@ -124,8 +124,13 @@ jobs:
           } >> "$GITHUB_ENV"
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      # `cargo test --workspace` also runs the manifest tripwire (tests/manifests.rs):
+      # internal path deps must carry a version and every crates/* dir must be a workspace member.
       - run: cargo test --workspace
-      - run: cargo publish --dry-run -p thepia --allow-dirty
+      # No `cargo publish` dry-run: `the` is distributed as binaries (npm / Homebrew / Nix / cdn),
+      # not to crates.io. the-output / the-skills are internal path deps that are never published,
+      # so a crates.io dry-run of the top crate cannot resolve them. If crates.io ever becomes a
+      # channel, publish the libs bottom-up and restore a dry-run gated on them being released.
 
   build:
     name: Dry-run build (${{ matrix.target }})
