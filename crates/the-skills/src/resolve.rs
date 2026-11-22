@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 
 use crate::links::check_links;
 use crate::locate::SearchRoot;
+use crate::orphans::check_orphans;
 use crate::parse::{Load, Parsed, Problem, claude_alias, display_name, lint, loads, parse};
 use crate::scan::{Link, link_in, scan};
 use crate::smoke::check_smoke;
@@ -245,6 +246,7 @@ pub fn build_for(plan: &[SearchRoot], agents: &[Agent]) -> Catalog {
             let mut lint = lint(&parsed, &dir);
             lint.extend(check_links(&parsed, skill_dir));
             lint.extend(check_smoke(&text, &parsed, skill_dir));
+            lint.extend(check_orphans(skill_dir));
             Skill {
                 name,
                 scope,

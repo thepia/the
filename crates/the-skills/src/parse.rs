@@ -492,6 +492,36 @@ fn description_word_count(desc: &str) -> usize {
         .count()
 }
 
+/// The first vague/generic filler phrase in a description, if any. A description is an agent's only
+/// routing signal, so filler like "various tasks" or "and much more" tells it nothing about *when*
+/// to load the skill. The list is deliberately narrow (strong markers only) to keep false positives
+/// low; the rule ships Beta. Matching is case-insensitive on a whitespace-collapsed form, so runs of
+/// spaces or newlines in the phrase do not defeat it.
+fn vague_description_phrase(desc: &str) -> Option<&'static str> {
+    const VAGUE_PHRASES: &[&str] = &[
+        "various tasks",
+        "many tasks",
+        "a variety of tasks",
+        "all kinds of",
+        "all sorts of",
+        "anything you need",
+        "whatever you need",
+        "and much more",
+        "and lots more",
+        "does everything",
+        "general utility",
+        "a variety of things",
+        "many things",
+        "helps with various",
+    ];
+    let normalized = desc.split_whitespace().collect::<Vec<_>>().join(" ");
+    let haystack = normalized.to_ascii_lowercase();
+    VAGUE_PHRASES
+        .iter()
+        .find(|phrase| haystack.contains(**phrase))
+        .copied()
+}
+
 /// Meaningful tokens of a string: lowercase alphanumeric runs of at least two characters, splitting on
 /// anything else (so `pdf-tools` -> {pdf, tools}). Drives `description-echoes-name`.
 fn meaningful_tokens(s: &str) -> std::collections::BTreeSet<String> {
@@ -568,7 +598,18 @@ pub fn lint(p: &Parsed, dir_name: &str) -> Vec<Problem> {
                 ),
             ));
         }
-        Some(_) => {}
+        // A description long enough to pass the terse check can still be generic filler; a vague
+        // phrase gives an agent nothing concrete to route on.
+        Some(d) => {
+            if let Some(phrase) = vague_description_phrase(d) {
+                out.push(Problem::new(
+                    "description-vague-generic",
+                    format!(
+                        "`description` uses the vague phrase `{phrase}`; name the concrete task and when to use the skill, not generic filler"
+                    ),
+                ));
+            }
+        }
     }
     if let Some(v) = p.frontmatter.get("license")
         && !v.is_string()
@@ -753,6 +794,22 @@ mod tests {
 
     fn err_code(p: &Parsed) -> Option<&'static str> {
         p.frontmatter_error.as_ref().map(|e| e.code)
+    }
+
+    #[test]
+    fn vague_description_is_flagged_but_concrete_one_is_not() {
+        // A long-enough but generic description trips the vague check.
+        let vague = "---\nname: helper\ndescription: A helpful assistant for various tasks and much more to boost productivity.\n---\n\nBody.\n";
+        assert!(
+            codes(&lint(&parse(vague), "helper")).contains(&"description-vague-generic"),
+            "a generic filler description must be flagged"
+        );
+        // A concrete description that happens to say what and when must not trip.
+        let concrete = "---\nname: pdf-split\ndescription: Split a PDF into one file per page when a user asks to break up a document.\n---\n\nBody.\n";
+        assert!(
+            !codes(&lint(&parse(concrete), "pdf-split")).contains(&"description-vague-generic"),
+            "a concrete description must not be flagged"
+        );
     }
 
     #[test]

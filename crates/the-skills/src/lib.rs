@@ -21,6 +21,7 @@ pub mod fix;
 pub mod installed;
 pub mod links;
 pub mod locate;
+pub mod orphans;
 pub mod parse;
 pub mod resolve;
 pub mod rules;
