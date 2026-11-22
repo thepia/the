@@ -59,15 +59,28 @@ pub fn stderr_color() -> bool {
 }
 
 /// Whether to emit color on a stream, given whether it is a terminal. Precedence (clig.dev,
-/// no-color.org, the CLICOLOR lineage, same as thepia/cli): `CLICOLOR_FORCE`/`FORCE_COLOR` force on;
-/// else `NO_COLOR` (non-empty) forces off; else `CLICOLOR=0` forces off; else on iff a terminal.
+/// no-color.org, the CLICOLOR lineage, same as thepia/cli): `CLICOLOR_FORCE`/`FORCE_COLOR` or a
+/// truthy `COLOR` force on; else `NO_COLOR` (non-empty), a falsy `COLOR` (empty or `0`), or
+/// `CLICOLOR=0` force off; else on iff a terminal.
 pub fn use_color(stream_is_tty: bool) -> bool {
+    let (color_on, color_off) = color_env(std::env::var_os("COLOR").as_deref());
     use_color_from(
         stream_is_tty,
-        env_truthy("CLICOLOR_FORCE") || env_truthy("FORCE_COLOR"),
-        std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()),
+        env_truthy("CLICOLOR_FORCE") || env_truthy("FORCE_COLOR") || color_on,
+        std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()) || color_off,
         std::env::var_os("CLICOLOR").is_some_and(|v| v == "0"),
     )
+}
+
+/// Interpret a `COLOR` env value into `(force_on, force_off)`. A truthy value forces color on; a
+/// present-but-falsy value (empty, as in `COLOR=`, or `0`) forces plain output off; absent is
+/// neutral. Pure so it is testable without touching the process environment.
+fn color_env(value: Option<&std::ffi::OsStr>) -> (bool, bool) {
+    match value {
+        None => (false, false),
+        Some(v) if v.is_empty() || v == "0" => (false, true),
+        Some(_) => (true, false),
+    }
 }
 
 /// Set to a non-empty value other than "0".
@@ -162,6 +175,32 @@ mod tests {
         );
         assert!(use_color_from(true, false, false, false));
         assert!(!use_color_from(false, false, false, false));
+    }
+
+    #[test]
+    fn color_env_forces_on_truthy_and_off_falsy() {
+        use std::ffi::OsStr;
+        assert_eq!(color_env(None), (false, false), "absent is neutral");
+        assert_eq!(
+            color_env(Some(OsStr::new(""))),
+            (false, true),
+            "`COLOR=` forces plain"
+        );
+        assert_eq!(
+            color_env(Some(OsStr::new("0"))),
+            (false, true),
+            "`COLOR=0` forces plain"
+        );
+        assert_eq!(
+            color_env(Some(OsStr::new("1"))),
+            (true, false),
+            "`COLOR=1` forces color"
+        );
+        assert_eq!(
+            color_env(Some(OsStr::new("always"))),
+            (true, false),
+            "any other value forces color"
+        );
     }
 
     #[test]

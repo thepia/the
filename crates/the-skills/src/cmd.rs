@@ -1,23 +1,24 @@
 //! `the skills list | show | dirs | lint`. Each builds a [`Report`]; rendering is format-independent.
 
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
 
+use clap::{Args, Command, FromArgMatches};
 use serde_json::{Value, json};
+use the_output::command::{CommandDescriptor, Ctx, Form, Invocation, Results, Target, Tier};
 
-use super::analysis::corpus_findings;
-use super::fix::{self, Advice, FixClass};
-use super::installed::installed_agents;
-use super::locate::{Env, SearchRoot, plan, plan_for};
-use super::parse::{Problem, ProblemKind};
-use super::resolve::{Catalog, RootInfo, Skill, Status, build, build_for};
-use super::{Agent, Scope, bundled_files};
+use crate::analysis::corpus_findings;
 use crate::cli::{ListForm, SearchArgs, SkillsArgs, SkillsCmd};
-use crate::diag::{Diagnostic, Exit, Level};
-use crate::output::{self, Format};
-use crate::style;
-use crate::table::{Block, Cell, Column, Human, Record, Report, Table, Tone};
+use crate::fix::{self, Advice, FixClass};
+use crate::installed::installed_agents;
+use crate::locate::{Env, SearchRoot, plan, plan_for};
+use crate::parse::{Problem, ProblemKind};
+use crate::resolve::{Catalog, RootInfo, Skill, Status, build, build_for};
+use crate::{Agent, Scope, bundled_files};
+use the_output::diag::{Diagnostic, Exit, Level, summarize};
+use the_output::output::Format;
+use the_output::style::{self, Term};
+use the_output::table::{Block, Cell, Column, Human, Record, Report, Table, Tone};
 
 const DESCRIPTION_WIDTH: usize = 72;
 
@@ -54,46 +55,190 @@ fn without_user(mut roots: Vec<SearchRoot>, no_user: bool) -> Vec<SearchRoot> {
     roots
 }
 
-pub fn run(args: SkillsArgs, format: Format, h: Human) -> Result<ExitCode, Diagnostic> {
+/// The `skills` command group as a routable [`Target`]. Registered into the pipeline's registry; the
+/// grammar is contributed by [`Target::augment`] and a routed invocation runs through
+/// [`Target::execute`], which returns a [`SkillsResults`] the pipeline renders.
+pub struct Skills;
+
+/// The commands this target owns, for help / governance and the registry drift test. Summaries follow
+/// the style guide (lowercase, imperative, no trailing period, <= 60 chars).
+const DESCRIPTORS: &[CommandDescriptor] = &[
+    CommandDescriptor {
+        path: "skills",
+        group: "skills",
+        tier: Tier::Core,
+        summary: "inspect and lint local agent skills",
+    },
+    CommandDescriptor {
+        path: "skills list",
+        group: "skills",
+        tier: Tier::Core,
+        summary: "list skills, their agents, and symlinks",
+    },
+    CommandDescriptor {
+        path: "skills show",
+        group: "skills",
+        tier: Tier::Aux,
+        summary: "show one skill's metadata and verdicts",
+    },
+    CommandDescriptor {
+        path: "skills dirs",
+        group: "skills",
+        tier: Tier::Aux,
+        summary: "list the directories each agent searches",
+    },
+    CommandDescriptor {
+        path: "skills lint",
+        group: "skills",
+        tier: Tier::Core,
+        summary: "lint skills for loadability, spec, links, security",
+    },
+];
+
+impl Target for Skills {
+    fn id(&self) -> &'static str {
+        "skills"
+    }
+
+    fn descriptors(&self) -> &'static [CommandDescriptor] {
+        DESCRIPTORS
+    }
+
+    fn augment(&self, root: Command) -> Command {
+        root.subcommand(
+            SkillsArgs::augment_args(Command::new("skills"))
+                .about("Agent Skills quality managed for local AI assistants use."),
+        )
+    }
+
+    fn execute(&self, inv: &Invocation, ctx: &Ctx) -> Result<Box<dyn Results>, Diagnostic> {
+        let args = SkillsArgs::from_arg_matches(&inv.matches).map_err(|e| {
+            Diagnostic::error("skills-args", "could not parse `skills` arguments")
+                .cause(e.to_string())
+                .exit(Exit::Usage)
+        })?;
+        // Build the result with the Human that matches the resolved stdout form, so prose blocks
+        // (which bake color at build time) are colored consistently with how they will render. The
+        // pipeline renders exactly once, with `ctx.form()`.
+        let colored = matches!(ctx.form(), Form::Ansi);
+        let h = Human {
+            term: Term {
+                color: colored,
+                tty: ctx.stdout().tty,
+            },
+            header: !ctx.no_header(),
+        };
+        let built = build_skills(args, ctx.format(), h)?;
+        Ok(Box::new(SkillsResults {
+            built,
+            h,
+            err_term: Term {
+                color: ctx.stderr().color,
+                tty: ctx.stderr().tty,
+            },
+        }))
+    }
+}
+
+/// Route a parsed `skills` invocation to its subcommand builder.
+fn build_skills(args: SkillsArgs, format: Format, h: Human) -> Result<Built, Diagnostic> {
     match args.command {
         Some(SkillsCmd::List(list_args)) => {
             let form = list_args.presentation();
             let search = with_positional(&list_args.search, list_args.path);
-            list(&search, form, format, h)?;
-            Ok(ExitCode::SUCCESS)
+            build_list(&search, form, format, h)
         }
-        Some(SkillsCmd::Show { name, search }) => {
-            show(&name, &search, format, h)?;
-            Ok(ExitCode::SUCCESS)
-        }
+        Some(SkillsCmd::Show { name, search }) => build_show(&name, &search),
         Some(SkillsCmd::Dirs { path, search }) => {
             let search = with_positional(&search, path);
-            dirs(&search, format, h)?;
-            Ok(ExitCode::SUCCESS)
+            build_dirs(&search)
         }
         Some(SkillsCmd::Lint {
             target,
             search,
             all,
             advice,
-        }) => lint(
-            target.as_deref(),
-            &search,
-            all,
-            advice,
-            args.beta,
-            format,
-            h,
-        ),
+        }) => build_lint(target.as_deref(), &search, all, advice, args.beta),
         None => {
             let form = if args.by_scope {
                 ListForm::ByScope
             } else {
                 ListForm::Prose
             };
-            list(&args.search, form, format, h)?;
-            Ok(ExitCode::SUCCESS)
+            build_list(&args.search, form, format, h)
         }
+    }
+}
+
+/// How a subcommand's issue diagnostics are presented on stderr.
+#[derive(Clone, Copy)]
+enum DiagMode {
+    /// Emit each diagnostic in turn (list, show, dirs).
+    Stream,
+    /// The capped, rustc-style summary with a `--all` hint (lint).
+    Summarize { all: bool },
+}
+
+/// A built-but-unrendered skills result: the stdout report, the stderr diagnostics (input `notices`
+/// that always stream plus the subcommand's `findings` presented per `mode`), and the exit code.
+struct Built {
+    report: Report,
+    /// Input notices (home-unset, unreadable path, no-skills): always streamed to stderr.
+    notices: Vec<Diagnostic>,
+    /// The subcommand's issues, presented per `mode`.
+    findings: Vec<Diagnostic>,
+    mode: DiagMode,
+    exit: u8,
+}
+
+/// The skills command result. Holds the report already built for the resolved form plus the stream
+/// state, so the pipeline renders it to stdout/stderr without re-running any logic.
+pub struct SkillsResults {
+    built: Built,
+    /// The `Human` the report was built with (color matches the resolved stdout form).
+    h: Human,
+    /// Terminal state for stderr diagnostics.
+    err_term: Term,
+}
+
+impl Results for SkillsResults {
+    fn render(&self, out: &mut dyn Write, form: Form) -> io::Result<()> {
+        out.write_all(self.built.report.render(form.format(), self.h).as_bytes())
+    }
+
+    fn render_diagnostics(&self, err: &mut dyn Write, format: Format) -> io::Result<()> {
+        for d in &self.built.notices {
+            err.write_all(d.render(format, self.err_term).as_bytes())?;
+        }
+        match (self.built.mode, format) {
+            (_, Format::Json) => {
+                for d in &self.built.findings {
+                    err.write_all(d.render(Format::Json, self.err_term).as_bytes())?;
+                }
+            }
+            (DiagMode::Stream, Format::Human) => {
+                for d in &self.built.findings {
+                    err.write_all(d.render(Format::Human, self.err_term).as_bytes())?;
+                }
+            }
+            (DiagMode::Summarize { all }, Format::Human) => {
+                if !self.built.findings.is_empty() {
+                    let limit = if all { None } else { Some(ISSUE_LIMIT) };
+                    let text = summarize(&self.built.findings, limit)
+                        .render(self.err_term, Some("the skills lint --all"));
+                    err.write_all(text.as_bytes())?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn diagnostics(&self) -> &[Diagnostic] {
+        &self.built.findings
+    }
+
+    fn exit_code(&self) -> u8 {
+        self.built.exit
     }
 }
 
@@ -109,23 +254,27 @@ fn status_cell(s: &Status) -> Cell {
 /// Plan and scan; report unusable inputs on stderr.
 /// When `only_installed` is true, only assistants installed on the machine (plus any explicitly
 /// requested `--agent`) are considered.
+/// Plan and scan; collect any unusable-input notices (returned to be streamed to stderr, never
+/// printed here). When `only_installed` is true, only assistants installed on the machine (plus any
+/// explicitly requested `--agent`) are considered.
 fn catalog(
     search: &SearchArgs,
-    format: Format,
     only_installed: bool,
-) -> Result<Catalog, Diagnostic> {
+) -> Result<(Catalog, Vec<Diagnostic>), Diagnostic> {
     let env = Env::from_process().map_err(|e| {
         Diagnostic::error("cwd-unavailable", "cannot determine the current directory")
             .cause(e.to_string())
             .help("run `the` from an existing, readable directory")
     })?;
+    let mut notices = Vec::new();
     if env.home.is_none() {
-        Diagnostic::warning(
-            "home-unset",
-            "HOME is not set; skipping user skill directories",
-        )
-        .help("set HOME, or pass a directory explicitly with `--dir <PATH>`")
-        .emit(format);
+        notices.push(
+            Diagnostic::warning(
+                "home-unset",
+                "HOME is not set; skipping user skill directories",
+            )
+            .help("set HOME, or pass a directory explicitly with `--dir <PATH>`"),
+        );
     }
     let cat = if only_installed {
         let mut agents = installed_agents(&env);
@@ -146,17 +295,30 @@ fn catalog(
         .iter()
         .filter(|r| r.agents.is_empty() && !r.exists)
     {
-        Diagnostic::warning("dir-not-found", "`--dir` is not a directory")
-            .context(r.path.display().to_string())
-            .emit(format);
+        notices.push(
+            Diagnostic::warning("dir-not-found", "`--dir` is not a directory")
+                .context(r.path.display().to_string()),
+        );
     }
     for e in &cat.errors {
-        Diagnostic::warning("unreadable", "could not read a skill path; skipped it")
-            .context(e.path.display().to_string())
-            .cause(e.error.to_string())
-            .emit(format);
+        notices.push(
+            Diagnostic::warning("unreadable", "could not read a skill path; skipped it")
+                .context(e.path.display().to_string())
+                .cause(e.error.to_string()),
+        );
     }
-    Ok(cat)
+    Ok((cat, notices))
+}
+
+/// The "no skills found" note, shared by list and lint.
+fn no_skills_note(cat: &Catalog) -> Diagnostic {
+    Diagnostic::note("no-skills", "no skills found")
+        .cause(format!(
+            "{} of {} searched directories exist",
+            cat.roots.iter().filter(|r| r.exists).count(),
+            cat.roots.len()
+        ))
+        .help("`the skills dirs` shows where each agent looks; `--dir <PATH>` searches another directory")
 }
 
 fn selected<'a>(cat: &'a Catalog, search: &SearchArgs) -> Vec<&'a Skill> {
@@ -280,7 +442,7 @@ fn collect_diagnostics(skills: &[&Skill]) -> Vec<Diagnostic> {
         }
 
         if !s.claude_alias_with.is_empty()
-            && let Some(alias) = super::parse::claude_alias(&s.parsed)
+            && let Some(alias) = crate::parse::claude_alias(&s.parsed)
             && !aliases_seen.contains(&alias)
         {
             aliases_seen.push(alias);
@@ -355,13 +517,6 @@ fn collect_diagnostics(skills: &[&Skill]) -> Vec<Diagnostic> {
     out
 }
 
-/// Emit diagnostics for `skills` to stderr.
-fn diagnose(skills: &[&Skill], format: Format) {
-    for d in collect_diagnostics(skills) {
-        d.emit(format);
-    }
-}
-
 fn status_json(s: &Skill) -> Value {
     let mut m = serde_json::Map::new();
     for v in &s.agents {
@@ -386,21 +541,31 @@ fn locations_json(s: &Skill) -> Value {
     )
 }
 
-fn list(search: &SearchArgs, form: ListForm, format: Format, h: Human) -> Result<(), Diagnostic> {
-    let cat = catalog(search, format, true)?;
+fn build_list(
+    search: &SearchArgs,
+    form: ListForm,
+    format: Format,
+    h: Human,
+) -> Result<Built, Diagnostic> {
+    let (cat, notices) = catalog(search, true)?;
     let skills = selected(&cat, search);
+    // The tabular and JSON forms stream the per-skill diagnostics; the prose forms carry their own
+    // inline issue summary instead, so per-skill diagnostics are suppressed there (unchanged).
+    let mut findings = Vec::new();
     if matches!(form, ListForm::Tabular) || matches!(format, Format::Json) {
-        diagnose(&skills, format);
+        findings = collect_diagnostics(&skills);
     }
     if skills.is_empty() {
-        Diagnostic::note("no-skills", "no skills found")
-            .cause(format!("{} of {} searched directories exist", cat.roots.iter().filter(|r| r.exists).count(), cat.roots.len()))
-            .help("`the skills dirs` shows where each agent looks; `--dir <PATH>` searches another directory")
-            .emit(format);
+        findings.push(no_skills_note(&cat));
     }
-
     let report = present_list(&skills, &cat.agents, &cat.roots, form, h);
-    output::print(&report.render(format, h))
+    Ok(Built {
+        report,
+        notices,
+        findings,
+        mode: DiagMode::Stream,
+        exit: 0,
+    })
 }
 
 /// Build the [`Report`] for `the skills` / `the skills list` in the requested [`ListForm`].
@@ -490,7 +655,7 @@ fn format_skill_paragraph(skills: &[&Skill], h: Human) -> String {
 
 fn issue_label(code: &str) -> &'static str {
     // Single source of truth: the rule registry (the-skills `rules`).
-    super::rules::label(code)
+    crate::rules::label(code)
 }
 
 /// Build a concise summary of totals and issue counts across `skills` for prose output.
@@ -690,19 +855,21 @@ fn roots_table(roots: &[RootInfo]) -> Table {
     t
 }
 
-fn dirs(search: &SearchArgs, format: Format, h: Human) -> Result<(), Diagnostic> {
-    let cat = catalog(search, format, false)?;
+fn build_dirs(search: &SearchArgs) -> Result<Built, Diagnostic> {
+    let (cat, notices) = catalog(search, false)?;
     let roots: Vec<RootInfo> = cat
         .roots
         .into_iter()
         .filter(|r| search.scope.is_none_or(|s| r.scope == s))
         .filter(|r| search.agent.is_none_or(|a| r.agents.contains(&a)))
         .collect();
-    output::print(
-        &Report::new()
-            .table("dirs", roots_table(&roots))
-            .render(format, h),
-    )
+    Ok(Built {
+        report: Report::new().table("dirs", roots_table(&roots)),
+        notices,
+        findings: Vec::new(),
+        mode: DiagMode::Stream,
+        exit: 0,
+    })
 }
 
 fn dir_name(skill_md: &Path) -> Option<String> {
@@ -712,8 +879,8 @@ fn dir_name(skill_md: &Path) -> Option<String> {
         .map(|n| n.to_string_lossy().into_owned())
 }
 
-fn show(name: &str, search: &SearchArgs, format: Format, h: Human) -> Result<(), Diagnostic> {
-    let cat = catalog(search, format, true)?;
+fn build_show(name: &str, search: &SearchArgs) -> Result<Built, Diagnostic> {
+    let (cat, notices) = catalog(search, true)?;
     let candidates = selected(&cat, search);
     let matches: Vec<&Skill> = candidates
         .iter()
@@ -753,8 +920,14 @@ fn show(name: &str, search: &SearchArgs, format: Format, h: Human) -> Result<(),
         }
     };
 
-    diagnose(&[skill], format);
-    output::print(&show_report(skill).render(format, h))
+    let findings = collect_diagnostics(&[skill]);
+    Ok(Built {
+        report: show_report(skill),
+        notices,
+        findings,
+        mode: DiagMode::Stream,
+        exit: 0,
+    })
 }
 
 fn not_found(name: &str, skills: &[&Skill]) -> Diagnostic {
@@ -878,15 +1051,13 @@ fn show_report(s: &Skill) -> Report {
         .text("body", s.parsed.body.clone())
 }
 
-fn lint(
+fn build_lint(
     target: Option<&str>,
     search: &SearchArgs,
     all: bool,
     advice: bool,
     beta: bool,
-    format: Format,
-    h: Human,
-) -> Result<ExitCode, Diagnostic> {
+) -> Result<Built, Diagnostic> {
     // A path-like target (`.`, `./x`, `../p`, `/abs`) is a scan root (lint that directory/project); a
     // bare word is a skill-name filter (lint that one skill).
     let (search_owned, name): (SearchArgs, Option<&str>) = match target {
@@ -894,7 +1065,7 @@ fn lint(
         other => (search.clone(), other),
     };
     let search = &search_owned;
-    let cat = catalog(search, format, true)?;
+    let (cat, mut notices) = catalog(search, true)?;
     let candidates = selected(&cat, search);
     let skills: Vec<&Skill> = match name {
         Some(target) => {
@@ -918,22 +1089,15 @@ fn lint(
     };
 
     if skills.is_empty() {
-        Diagnostic::note("no-skills", "no skills found")
-            .cause(format!(
-                "{} of {} searched directories exist",
-                cat.roots.iter().filter(|r| r.exists).count(),
-                cat.roots.len()
-            ))
-            .help("`the skills dirs` shows where each agent looks; `--dir <PATH>` searches another directory")
-            .emit(format);
+        notices.push(no_skills_note(&cat));
     }
 
-    let mut diags = collect_diagnostics(&skills);
+    let mut findings = collect_diagnostics(&skills);
     // Corpus-level beta rules (`redundant-with`, `superseded-by`): computed always so a graduated rule
     // works by default, then gated on each rule's `stability` in the registry — shown only with
     // `--beta` while still staged. Graduation is flipping one field in `the-skills::rules`.
     for (skill_name, path, p) in corpus_findings(&skills) {
-        diags.push(
+        findings.push(
             Diagnostic::warning(
                 p.code,
                 format!("skill `{skill_name}`: {}", issue_label(p.code)),
@@ -943,46 +1107,34 @@ fn lint(
             .help(p.fix),
         );
     }
-    diags.retain(|d| beta || !super::rules::is_beta(d.code));
+    findings.retain(|d| beta || !crate::rules::is_beta(d.code));
 
-    // Result first: print the table on stdout so a reader sees the overview before the issues.
-    // `--advice` adds a fix-advice table (also a stdout result: it is the requested fix plan, per
-    // SPEC-0001 OUT) classing each issue auto / assisted / manual, writing nothing.
+    // Result first: the table on stdout so a reader sees the overview before the issues. `--advice`
+    // adds a fix-advice table (also a stdout result: the requested fix plan, per SPEC-0001 OUT)
+    // classing each issue auto / assisted / manual, writing nothing.
     let mut report = Report::new().table("skills", lint_table(&skills, beta));
     if advice {
         report = report.table("advice", advice_table(&fix::plan_advice(&skills)));
     }
     let report = report
-        .json_only("diagnostics", Block::Table(diagnostics_table(&diags)))
+        .json_only("diagnostics", Block::Table(diagnostics_table(&findings)))
         .json_only("searched", Block::Table(roots_table(&cat.roots)));
-    output::print(&report.render(format, h))?;
 
-    // Then the diagnostics on stderr: JSON streams all of them; human shows the most urgent few
-    // (each with its file link and fix) plus a status line, directing to `--all` for the rest.
-    match format {
-        Format::Json => {
-            for d in &diags {
-                d.emit(format);
-            }
-        }
-        Format::Human if !diags.is_empty() => {
-            // Shared renderer (the-output): the most urgent few, then a `= status:` count line.
-            let limit = if all { None } else { Some(ISSUE_LIMIT) };
-            let text = crate::diag::summarize(&diags, limit)
-                .render(style::Term::stderr(), Some("the skills lint --all"));
-            let _ = std::io::stderr().lock().write_all(text.as_bytes());
-        }
-        Format::Human => {}
-    }
-
-    let has_error_or_warning = diags
+    let exit = if findings
         .iter()
-        .any(|d| matches!(d.level, Level::Error | Level::Warning));
-    if has_error_or_warning {
-        Ok(ExitCode::from(Exit::Generic as u8))
+        .any(|d| matches!(d.level, Level::Error | Level::Warning))
+    {
+        Exit::Generic as u8
     } else {
-        Ok(ExitCode::SUCCESS)
-    }
+        0
+    };
+    Ok(Built {
+        report,
+        notices,
+        findings,
+        mode: DiagMode::Summarize { all },
+        exit,
+    })
 }
 
 /// Cap on urgent issues shown after the table before the summary suggests `--all`.
@@ -1006,7 +1158,7 @@ fn lint_table(skills: &[&Skill], beta: bool) -> Table {
         let lint: Vec<&Problem> = s
             .lint
             .iter()
-            .filter(|p| beta || !super::rules::is_beta(p.code))
+            .filter(|p| beta || !crate::rules::is_beta(p.code))
             .collect();
         let mut codes: Vec<String> = Vec::new();
         for v in &s.agents {
@@ -1144,4 +1296,229 @@ fn diagnostics_table(diags: &[Diagnostic]) -> Table {
         ]);
     }
     t
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn plain_results(built: Built) -> SkillsResults {
+        SkillsResults {
+            built,
+            h: Human {
+                term: Term {
+                    color: false,
+                    tty: false,
+                },
+                header: true,
+            },
+            err_term: Term {
+                color: false,
+                tty: false,
+            },
+        }
+    }
+
+    fn render_to_string(res: &SkillsResults, form: Form) -> String {
+        let mut out = Vec::new();
+        res.render(&mut out, form).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    fn diags_to_string(res: &SkillsResults, format: Format) -> String {
+        let mut err = Vec::new();
+        res.render_diagnostics(&mut err, format).unwrap();
+        String::from_utf8(err).unwrap()
+    }
+
+    // The descriptor table must match the clap subcommand tree: a command added to one but not the
+    // other is a registration bug. Mirrors cli's `catalog_matches_the_clap_tree`.
+    #[test]
+    fn descriptors_match_the_clap_tree() {
+        let root = Skills.augment(Command::new("the"));
+        let skills_cmd = root
+            .get_subcommands()
+            .find(|c| c.get_name() == "skills")
+            .expect("skills subcommand folded onto the root");
+
+        let mut real = vec!["skills".to_string()];
+        for sub in skills_cmd.get_subcommands().filter(|c| !c.is_hide_set()) {
+            if sub.get_name() == "help" {
+                continue;
+            }
+            real.push(format!("skills {}", sub.get_name()));
+        }
+        real.sort();
+
+        let mut declared: Vec<String> = DESCRIPTORS.iter().map(|d| d.path.to_string()).collect();
+        declared.sort();
+
+        assert_eq!(
+            declared, real,
+            "skills descriptors must match the clap subcommand tree exactly"
+        );
+    }
+
+    #[test]
+    fn descriptor_summaries_follow_the_style_guide() {
+        for d in DESCRIPTORS {
+            assert!(d.summary.len() <= 60, "`{}` summary too long", d.path);
+            assert!(
+                !d.summary.ends_with('.'),
+                "`{}` summary has a trailing period",
+                d.path
+            );
+            assert_eq!(
+                d.summary,
+                d.summary.to_lowercase(),
+                "`{}` summary should be lowercase",
+                d.path
+            );
+            assert_eq!(d.group, "skills");
+        }
+    }
+
+    #[test]
+    fn render_emits_the_report_as_plain_and_json() {
+        let built = Built {
+            report: Report::new().text("msg", "hello world"),
+            notices: Vec::new(),
+            findings: Vec::new(),
+            mode: DiagMode::Stream,
+            exit: 0,
+        };
+        let res = plain_results(built);
+        assert_eq!(render_to_string(&res, Form::Plain).trim(), "hello world");
+        // JSON renders the same block as a typed document (the one section collapses to its value).
+        let json = render_to_string(&res, Form::Json);
+        assert!(json.contains("hello world"));
+        assert!(json.trim_start().starts_with('{') || json.trim_start().starts_with('"'));
+        assert_eq!(res.exit_code(), 0);
+    }
+
+    #[test]
+    fn stream_mode_emits_each_notice_and_finding() {
+        let built = Built {
+            report: Report::new(),
+            notices: vec![Diagnostic::warning("home-unset", "HOME is not set")],
+            findings: vec![Diagnostic::warning("broken-link", "a link is broken")],
+            mode: DiagMode::Stream,
+            exit: 0,
+        };
+        let res = plain_results(built);
+        let err = diags_to_string(&res, Format::Human);
+        assert!(err.contains("HOME is not set"), "notice streamed");
+        assert!(err.contains("a link is broken"), "finding streamed");
+    }
+
+    #[test]
+    fn summarize_mode_caps_findings_and_points_to_all() {
+        // Six findings, summarize mode with all=false caps the shown list and names `--all`.
+        let findings: Vec<Diagnostic> = (0..6)
+            .map(|i| Diagnostic::warning("broken-link", format!("issue {i}")))
+            .collect();
+        let built = Built {
+            report: Report::new(),
+            notices: Vec::new(),
+            findings,
+            mode: DiagMode::Summarize { all: false },
+            exit: Exit::Generic as u8,
+        };
+        let res = plain_results(built);
+        let err = diags_to_string(&res, Format::Human);
+        assert!(
+            err.contains("the skills lint --all"),
+            "names the --all hint"
+        );
+        assert_eq!(res.exit_code(), Exit::Generic as u8);
+    }
+
+    #[test]
+    fn json_findings_stream_regardless_of_mode() {
+        let built = Built {
+            report: Report::new(),
+            notices: Vec::new(),
+            findings: vec![Diagnostic::warning("broken-link", "a link is broken")],
+            mode: DiagMode::Summarize { all: false },
+            exit: Exit::Generic as u8,
+        };
+        let res = plain_results(built);
+        let err = diags_to_string(&res, Format::Json);
+        assert!(err.contains("broken-link"), "JSON streams each finding");
+        assert!(err.contains('{'), "JSON object per line");
+    }
+
+    // An in-process run of the real pipeline: parse → execute → render to buffers, against a
+    // hermetic temp skill dir. This exercises execute/build_lint/catalog/SkillsResults in-process
+    // (the CLI integration tests exercise the same path in a subprocess, which coverage can't see).
+    #[test]
+    fn execute_lints_a_dir_in_process() {
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("the-cmd-exec-{}", std::process::id()));
+        let skill = dir.join("myskill");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&skill).unwrap();
+        fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: myskill\ndescription: PDF tools\n---\n# Body\n",
+        )
+        .unwrap();
+
+        let root = Skills.augment(Command::new("the"));
+        let m = root
+            .try_get_matches_from([
+                "the",
+                "skills",
+                "lint",
+                "--scope",
+                "dir",
+                "--dir",
+                dir.to_str().unwrap(),
+            ])
+            .unwrap();
+        let (_id, sub) = m.subcommand().unwrap();
+        let plain = the_output::command::StreamState {
+            color: false,
+            tty: false,
+        };
+        let ctx = Ctx::new(Format::Human, false, plain, plain);
+        let inv = Invocation {
+            target: "skills",
+            matches: sub.clone(),
+        };
+        let results = Skills.execute(&inv, &ctx).unwrap();
+
+        let mut out = Vec::new();
+        results.render(&mut out, Form::Plain).unwrap();
+        assert!(
+            String::from_utf8(out).unwrap().contains("myskill"),
+            "the lint table lists the scanned skill"
+        );
+        // A terse description ("PDF tools") is flagged as a spec note, so there is a finding and a
+        // stderr diagnostic naming the skill (notes do not raise the exit code).
+        assert!(
+            !results.diagnostics().is_empty(),
+            "the terse description is a finding"
+        );
+        let mut err = Vec::new();
+        results.render_diagnostics(&mut err, Format::Human).unwrap();
+        assert!(
+            String::from_utf8(err).unwrap().contains("myskill"),
+            "the finding names the skill on stderr"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn is_path_like_distinguishes_paths_from_skill_names() {
+        assert!(is_path_like("."));
+        assert!(is_path_like(".."));
+        assert!(is_path_like("./x"));
+        assert!(is_path_like("../p"));
+        assert!(is_path_like("/abs/dir"));
+        assert!(is_path_like("~/skills"));
+        assert!(!is_path_like("my-skill"));
+        assert!(!is_path_like("pdf"));
+    }
 }

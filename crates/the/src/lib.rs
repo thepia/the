@@ -4,35 +4,32 @@
 //! warnings and notes go to stderr. `--format human|json` is the single switch for both.
 
 mod cli;
-mod skills;
 
-// The CLI output primitives (diagnostics, tables, the format switch, styling) are the shared
-// `the-output` crate (ADR-0001 / WORK-0019). Re-export them at the crate root so the command modules
-// keep reaching them as `crate::{diag,table,output,style}`.
-use the_output::{diag, output, style, table};
-
+use std::io;
 use std::process::ExitCode;
 
-use clap::Parser;
+use the_output::command::{Registry, StreamState, dispatch};
+
+/// The built-in command registry: every command group is its own crate, registered here as a
+/// [`the_output::command::Target`]. Adding a group is a `register` + a crate dep, not a dispatch arm.
+fn registry() -> Registry {
+    Registry::new().register(Box::new(the_skills::Skills))
+}
 
 pub fn run() -> ExitCode {
     ensure_process_name();
-    let cli = cli::Cli::parse();
-    let format = cli.format;
-    let human = table::Human {
-        term: style::Term::stdout(),
-        header: !cli.no_header,
-    };
-    let result = match cli.command {
-        cli::Command::Skills(cmd) => skills::cmd::run(cmd, format, human),
-    };
-    match result {
-        Ok(code) => code,
-        Err(d) => {
-            d.emit(format);
-            ExitCode::from(d.exit as u8)
-        }
-    }
+    let mut out = io::stdout().lock();
+    let mut err = io::stderr().lock();
+    let code = dispatch(
+        &registry(),
+        cli::root_command(),
+        std::env::args_os(),
+        StreamState::stdout(),
+        StreamState::stderr(),
+        &mut out,
+        &mut err,
+    );
+    ExitCode::from(code)
 }
 
 /// Ensure the running process appears as `thepia` in OS process lists (`ps`, `top`, Activity Monitor)
@@ -120,6 +117,25 @@ mod rename_target_tests {
         let dir = tmp("absent");
         // `the` with no `thepia` beside it (and no resolvable symlink target) -> None.
         assert_eq!(rename_target(Path::new("th"), &dir.join("th")), None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolves_sibling_thepia_after_canonicalizing_a_symlinked_exe() {
+        // exe is a symlink in a dir with no `thepia`; its canonical target's dir holds `thepia`. This
+        // exercises the canonicalize fallback (the second arm of `or_else`).
+        let dir = tmp("canon");
+        let real = dir.join("real");
+        fs::create_dir_all(&real).unwrap();
+        let thepia = real.join("thepia");
+        fs::write(&thepia, b"x").unwrap();
+        fs::write(real.join("the"), b"x").unwrap();
+        let exe = dir.join("the");
+        std::os::unix::fs::symlink(real.join("the"), &exe).unwrap();
+        assert_eq!(
+            rename_target(Path::new("the"), &exe),
+            Some(real.canonicalize().unwrap().join("thepia"))
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 }
