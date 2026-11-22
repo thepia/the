@@ -164,7 +164,20 @@ impl CommandSpec {
 
     /// Execute the command and capture its output, classifying quota/rate limits if present.
     pub fn run(&self) -> io::Result<CommandOutput> {
-        let out: Output = self.to_command().output()?;
+        // Retry on ETXTBSY (errno 26): a freshly written-and-chmod'd executable can briefly report
+        // "text file busy" on Linux (seen in the hermetic Nix sandbox under parallel load). Bounded
+        // retry with a short backoff; any other error propagates immediately.
+        let mut attempts = 0;
+        let out: Output = loop {
+            match self.to_command().output() {
+                Ok(o) => break o,
+                Err(e) if e.raw_os_error() == Some(26) && attempts < 50 => {
+                    attempts += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(e) => return Err(e),
+            }
+        };
         let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
         let combined = if stderr.is_empty() {
