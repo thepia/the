@@ -32,6 +32,15 @@ With Cargo (Rust 1.88 or newer):
 cargo install --git https://github.com/Thepia/the thepia
 ```
 
+From a GitHub release tarball (no package manager): download the bundle for your OS/CPU from the
+[releases page](https://github.com/Thepia/the/releases), then run the bundled `install.sh`. It installs
+the binary under `~/.thepia/bin` and links `thepia` / `the` / `th` onto your PATH if a standard bin
+directory is writable, falling back to a one-line PATH instruction otherwise (no `sudo` is forced).
+
+```sh
+tar xzf thepia-v*-*.tar.gz && ./thepia-v*-*/install.sh
+```
+
 ## Development
 
 See [docs/DEVELOP.md](docs/DEVELOP.md) for architecture, design principles, and packaging details.
