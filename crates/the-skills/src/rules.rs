@@ -221,6 +221,14 @@ pub const RULES: &[Rule] = &[
         severity: Warn,
         stability: Default,
     },
+    Rule {
+        code: "unclosed-code-fence",
+        label: "unclosed code fence in SKILL.md",
+        fix: "close the ``` (or ~~~) fence; everything after an unclosed fence is read as code",
+        kind: Spec,
+        severity: Warn,
+        stability: Default,
+    },
     // Security / safety.
     Rule {
         code: "symlink-escape",
@@ -254,7 +262,15 @@ pub const RULES: &[Rule] = &[
         severity: Warn,
         stability: Default,
     },
-    // Beta (corpus-level, staged behind `--beta`; graduate by setting stability to Default).
+    // Beta (staged behind `--beta`; graduate by setting stability to Default).
+    Rule {
+        code: "trailing-newline",
+        label: "missing or extra trailing newline",
+        fix: "end SKILL.md with exactly one trailing newline",
+        kind: Spec,
+        severity: Note,
+        stability: Beta,
+    },
     Rule {
         code: "redundant-with",
         label: "near-duplicate of another skill",

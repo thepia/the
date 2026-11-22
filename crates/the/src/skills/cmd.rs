@@ -889,7 +889,7 @@ fn lint(
     // Result first: print the table on stdout so a reader sees the overview before the issues.
     // `--advice` adds a fix-advice table (also a stdout result: it is the requested fix plan, per
     // SPEC-0001 OUT) classing each issue auto / assisted / manual, writing nothing.
-    let mut report = Report::new().table("skills", lint_table(&skills));
+    let mut report = Report::new().table("skills", lint_table(&skills, beta));
     if advice {
         report = report.table("advice", advice_table(&fix::plan_advice(&skills)));
     }
@@ -929,7 +929,7 @@ fn lint(
 /// Cap on urgent issues shown after the table before the summary suggests `--all`.
 const ISSUE_LIMIT: usize = 5;
 
-fn lint_table(skills: &[&Skill]) -> Table {
+fn lint_table(skills: &[&Skill], beta: bool) -> Table {
     let mut t = Table::new(vec![
         Column::new("name", "NAME"),
         Column::new("scope", "SCOPE"),
@@ -942,6 +942,13 @@ fn lint_table(skills: &[&Skill]) -> Table {
     ]);
 
     for s in skills {
+        // Beta rules (staged behind `--beta`) are hidden from the result table by default, matching
+        // how the diagnostics stream is gated; without this a per-skill beta rule would leak here.
+        let lint: Vec<&Problem> = s
+            .lint
+            .iter()
+            .filter(|p| beta || !super::rules::is_beta(p.code))
+            .collect();
         let mut codes: Vec<String> = Vec::new();
         for v in &s.agents {
             match &v.status {
@@ -958,27 +965,26 @@ fn lint_table(skills: &[&Skill]) -> Table {
                 Status::Loaded | Status::Shadowed { .. } => {}
             }
         }
-        for p in &s.lint {
+        for p in &lint {
             if !codes.iter().any(|c| c == p.code) {
                 codes.push(p.code.to_owned());
             }
         }
 
-        let has_error = s.lint.iter().any(Problem::is_error);
+        let has_error = lint.iter().any(|p| p.is_error());
         let has_warning = s.agents.iter().any(|v| {
             matches!(
                 v.status,
                 Status::Skipped(_) | Status::Conflict { .. } | Status::Unknown(_)
             )
-        }) || s
-            .lint
+        }) || lint
             .iter()
             .any(|p| !p.is_error() && p.kind() != ProblemKind::Spec);
         let status = if has_error {
             Cell::toned(Tone::Fail, "error")
         } else if has_warning {
             Cell::toned(Tone::Warn, "warning")
-        } else if !s.lint.is_empty() {
+        } else if !lint.is_empty() {
             Cell::toned(Tone::Dim, "note")
         } else {
             Cell::toned(Tone::Ok, "ok")
@@ -992,7 +998,7 @@ fn lint_table(skills: &[&Skill]) -> Table {
             codes.into(),
             s.path.clone().into(),
             s.dir().to_path_buf().into(),
-            Cell::Json(json!(s.lint)),
+            Cell::Json(json!(lint)),
         ]);
     }
     t

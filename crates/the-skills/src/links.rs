@@ -31,6 +31,8 @@ pub fn check_body_links(body: &str, body_start_line: usize, skill_dir: &Path) ->
     let canonical_skill_dir =
         fs::canonicalize(skill_dir).unwrap_or_else(|_| skill_dir.to_path_buf());
     let mut active_fence: Option<(char, usize)> = None;
+    // 1-based SKILL.md line of the currently-open fence, for the unclosed-fence report.
+    let mut fence_open_line = 0usize;
     // CommonMark indented code blocks (>= 4 columns of leading whitespace) are not fenced but still
     // code, so links inside them are not real. An indented block cannot interrupt a paragraph, so it
     // only starts after a blank line (or continues a block already in indented code).
@@ -50,6 +52,7 @@ pub fn check_body_links(body: &str, body_start_line: usize, skill_dir: &Path) ->
         }
         if let Some(fence) = parse_opening_fence(trimmed) {
             active_fence = Some(fence);
+            fence_open_line = line_num;
             prev_blank = false;
             in_indented_code = false;
             continue;
@@ -136,6 +139,19 @@ pub fn check_body_links(body: &str, body_start_line: usize, skill_dir: &Path) ->
                 );
             }
         }
+    }
+
+    // A fence that opened but never closed swallows the rest of the skill as code.
+    if active_fence.is_some() {
+        out.push(
+            Problem::new(
+                "unclosed-code-fence",
+                format!(
+                    "code fence opened at SKILL.md line {fence_open_line} is never closed; everything after it is read as code"
+                ),
+            )
+            .at_line(fence_open_line),
+        );
     }
 
     out
@@ -551,6 +567,41 @@ Example:
         assert!(
             check_links(&parse(doc), &sk.dir).is_empty(),
             "links inside a 4-space indented code block must be ignored"
+        );
+    }
+
+    #[test]
+    fn unclosed_code_fence_is_flagged_at_the_opening_line() {
+        let sk = TempSkill::new();
+        let doc = "\
+---
+name: a
+description: d
+---
+
+# Demo
+
+```sh
+echo hello
+";
+        let problems = check_links(&parse(doc), &sk.dir);
+        let p = problems
+            .iter()
+            .find(|p| p.code == "unclosed-code-fence")
+            .unwrap_or_else(|| panic!("expected unclosed-code-fence, got {problems:?}"));
+        // The ``` opens on SKILL.md line 8 (4 frontmatter lines + blank + heading + blank + fence).
+        assert_eq!(p.line, Some(8), "{p:?}");
+    }
+
+    #[test]
+    fn a_closed_fence_is_not_flagged_unclosed() {
+        let sk = TempSkill::new();
+        let doc = "---\nname: a\ndescription: d\n---\n\n```sh\necho hi\n```\n";
+        assert!(
+            check_links(&parse(doc), &sk.dir)
+                .iter()
+                .all(|p| p.code != "unclosed-code-fence"),
+            "a closed fence must not be reported as unclosed"
         );
     }
 }

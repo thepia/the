@@ -140,6 +140,9 @@ pub struct Parsed {
     pub body: String,
     /// 1-based line number in `SKILL.md` where `body` starts.
     pub body_start_line: usize,
+    /// Count of `\n` at the very end of the file (LF). Exactly 1 is well-formed;
+    /// 0 (no final newline) or >1 (trailing blank lines) drives `trailing-newline`.
+    pub trailing_newlines: usize,
 }
 
 impl Parsed {
@@ -194,6 +197,7 @@ pub fn parse(text: &str) -> Parsed {
     let mut out = Parsed {
         body: trimmed_body.to_owned(),
         body_start_line: 3 + yaml_lines + stripped_newlines,
+        trailing_newlines: text.len() - text.trim_end_matches('\n').len(),
         ..Parsed::default()
     };
     let invalid = |m: String| Some(Problem::new("frontmatter-invalid", m));
@@ -593,6 +597,18 @@ pub fn lint(p: &Parsed, dir_name: &str) -> Vec<Problem> {
             format!("body contains the placeholder `{marker}`; the skill looks unfinished"),
         ));
     }
+    // Exactly one trailing newline is well-formed (Beta: staged behind `--beta`).
+    if p.trailing_newlines != 1 {
+        let detail = if p.trailing_newlines == 0 {
+            "SKILL.md does not end with a newline".to_owned()
+        } else {
+            format!(
+                "SKILL.md ends with {} trailing newlines",
+                p.trailing_newlines
+            )
+        };
+        out.push(Problem::new("trailing-newline", detail));
+    }
     out
 }
 
@@ -632,6 +648,36 @@ mod tests {
 
     fn err_code(p: &Parsed) -> Option<&'static str> {
         p.frontmatter_error.as_ref().map(|e| e.code)
+    }
+
+    #[test]
+    fn trailing_newline_flags_missing_and_extra_only() {
+        let base = "---\nname: a\ndescription: a clear useful tool\n---\n\nBody.";
+        // Exactly one trailing newline: well-formed, no flag.
+        assert!(
+            !codes(&lint(&parse(&format!("{base}\n")), "a")).contains(&"trailing-newline"),
+            "one trailing newline must be accepted"
+        );
+        // No final newline: flagged.
+        assert!(
+            codes(&lint(&parse(base), "a")).contains(&"trailing-newline"),
+            "a missing final newline must be flagged"
+        );
+        // Two trailing newlines: flagged.
+        assert!(
+            codes(&lint(&parse(&format!("{base}\n\n")), "a")).contains(&"trailing-newline"),
+            "extra trailing newlines must be flagged"
+        );
+        // A frontmatter-only skill ending in one newline is well-formed (counted from the
+        // file, not the empty body).
+        assert!(
+            !codes(&lint(
+                &parse("---\nname: a\ndescription: a clear useful tool\n---\n"),
+                "a"
+            ))
+            .contains(&"trailing-newline"),
+            "a body-less skill with one trailing newline must be accepted"
+        );
     }
 
     #[test]
