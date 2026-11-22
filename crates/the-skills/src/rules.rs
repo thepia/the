@@ -429,6 +429,15 @@ pub const RULES: &[Rule] = &[
         severity: Warn,
         stability: Beta,
     },
+    Rule {
+        code: "skill-overlap",
+        label: "descriptions overlap enough to confuse routing",
+        why: "two similar descriptions make the agent pick between the skills at random, so the wrong one may fire",
+        fix: "differentiate the two descriptions (distinct task, trigger, or domain terms) so each routes uniquely",
+        kind: Spec,
+        severity: Warn,
+        stability: Beta,
+    },
 ];
 
 /// The rule for `code`, if registered.

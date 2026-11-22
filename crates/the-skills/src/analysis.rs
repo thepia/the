@@ -27,6 +27,10 @@ const REDUNDANT_JACCARD: f64 = 0.55;
 const SUPERSEDE_CONTAINMENT: f64 = 0.8;
 /// Fewer than this many meaningful description tokens is too thin to rank for redundancy.
 const MIN_DESC_TOKENS: usize = 4;
+/// Pairwise description Jaccard at or above this (but below [`REDUNDANT_JACCARD`]) reads as a routing
+/// collision: similar enough that the agent picks between the two skills at random (`skill-overlap`,
+/// TRIG2). At or above `REDUNDANT_JACCARD` it is the stronger near-duplicate signal instead.
+const OVERLAP_JACCARD: f64 = 0.45;
 
 /// Generic words that carry no distinguishing signal for a skill.
 const STOPWORDS: &[&str] = &[
@@ -78,6 +82,9 @@ pub enum Relation {
     /// Description missing, unreadable (e.g. invalid YAML), or too thin to assess; fix it before
     /// judging redundancy.
     ThinDescription,
+    /// Similar enough to `other` to confuse routing (Jaccard in `[OVERLAP, REDUNDANT)`), but not a
+    /// near-duplicate; differentiate the two descriptions. The routing-quality signal (TRIG2).
+    Overlaps,
 }
 
 impl Relation {
@@ -86,6 +93,7 @@ impl Relation {
             Relation::RedundantWith => "redundant-with",
             Relation::SupersededBy => "superseded-by",
             Relation::ThinDescription => "thin-description",
+            Relation::Overlaps => "skill-overlap",
         }
     }
 
@@ -96,6 +104,9 @@ impl Relation {
             Relation::SupersededBy => "review: scope covered by the other; retire or narrow",
             Relation::ThinDescription => {
                 "retune: description missing or too thin to assess; fix it first"
+            }
+            Relation::Overlaps => {
+                "review: similar descriptions may collide in routing; differentiate"
             }
         }
     }
@@ -112,6 +123,8 @@ pub struct Candidate {
     pub similarity: f64,
     /// Count of shared `allowed-tools` grants (corroborating).
     pub shared_tools: usize,
+    /// The description terms the two skills share, for an `Overlaps` finding; empty otherwise.
+    pub shared_terms: Vec<String>,
 }
 
 /// Lowercased, de-punctuated, stop-word-filtered token set of `text`.
@@ -187,6 +200,11 @@ pub fn corpus_findings(skills: &[&Skill]) -> Vec<(String, PathBuf, Problem)> {
                     c.similarity * 100.0
                 ),
                 Relation::SupersededBy => format!("scope appears covered by the broader `{other}`"),
+                Relation::Overlaps => format!(
+                    "description overlaps `{other}` ({:.0}%); shared terms: {}",
+                    c.similarity * 100.0,
+                    c.shared_terms.join(", ")
+                ),
                 Relation::ThinDescription => return None,
             };
             let path = by_name.get(c.skill.as_str())?.to_path_buf();
@@ -226,6 +244,7 @@ pub fn candidates_from(sigs: &[Sig]) -> Vec<Candidate> {
                     other: None,
                     similarity: 0.0,
                     shared_tools: 0,
+                    shared_terms: Vec::new(),
                 });
                 false
             } else {
@@ -239,19 +258,16 @@ pub fn candidates_from(sigs: &[Sig]) -> Vec<Candidate> {
             let (a, b) = (rankable[i], rankable[j]);
             let shared_tools = a.tools.intersection(&b.tools).count();
             let jac = jaccard(&a.desc, &b.desc);
+            // Lexicographically first name is the subject, for stable symmetric output.
+            let (first, second) = if a.name <= b.name { (a, b) } else { (b, a) };
             if jac >= REDUNDANT_JACCARD {
-                // Symmetric: emit once, the lexicographically first name as the subject for stability.
-                let (skill, other) = if a.name <= b.name {
-                    (&a.name, &b.name)
-                } else {
-                    (&b.name, &a.name)
-                };
                 out.push(Candidate {
-                    skill: skill.clone(),
+                    skill: first.name.clone(),
                     relation: Relation::RedundantWith,
-                    other: Some(other.clone()),
+                    other: Some(second.name.clone()),
                     similarity: jac,
                     shared_tools,
+                    shared_terms: Vec::new(),
                 });
                 continue;
             }
@@ -265,6 +281,7 @@ pub fn candidates_from(sigs: &[Sig]) -> Vec<Candidate> {
                     other: Some(b.name.clone()),
                     similarity: a_in_b,
                     shared_tools,
+                    shared_terms: Vec::new(),
                 });
             } else if b_in_a >= SUPERSEDE_CONTAINMENT && b.desc.len() < a.desc.len() {
                 out.push(Candidate {
@@ -273,6 +290,20 @@ pub fn candidates_from(sigs: &[Sig]) -> Vec<Candidate> {
                     other: Some(a.name.clone()),
                     similarity: b_in_a,
                     shared_tools,
+                    shared_terms: Vec::new(),
+                });
+            } else if jac >= OVERLAP_JACCARD {
+                // Not a near-duplicate and neither contains the other, but similar enough that the
+                // router may pick between them at random: the TRIG2 routing-collision signal.
+                let shared_terms: Vec<String> =
+                    first.desc.intersection(&second.desc).cloned().collect();
+                out.push(Candidate {
+                    skill: first.name.clone(),
+                    relation: Relation::Overlaps,
+                    other: Some(second.name.clone()),
+                    similarity: jac,
+                    shared_tools,
+                    shared_terms,
                 });
             }
         }
@@ -380,6 +411,46 @@ mod tests {
         assert!(
             c.iter().all(|c| c.other.is_none()),
             "a thin description is standalone, not a redundancy claim"
+        );
+    }
+
+    #[test]
+    fn similar_but_not_duplicate_skills_are_flagged_as_overlap_with_shared_terms() {
+        // 8 distinctive tokens each, 5 shared: Jaccard = 5/11 ~ 0.45 (in the overlap band, below the
+        // 0.55 redundancy threshold); containment 5/8 = 0.625 (below the 0.8 supersede threshold).
+        let sigs = [
+            sig(
+                "bravo",
+                "crawl website extract structured profile output format markdown",
+                &[],
+            ),
+            sig(
+                "alpha",
+                "crawl website extract structured profile data report json",
+                &[],
+            ),
+        ];
+        let c = candidates_from(&sigs);
+        let over: Vec<_> = c
+            .iter()
+            .filter(|c| c.relation == Relation::Overlaps)
+            .collect();
+        assert_eq!(over.len(), 1, "one overlap row per unordered pair: {c:?}");
+        assert_eq!(over[0].skill, "alpha"); // lexicographically first is the subject
+        assert_eq!(over[0].other.as_deref(), Some("bravo"));
+        assert!(over[0].similarity >= OVERLAP_JACCARD && over[0].similarity < REDUNDANT_JACCARD);
+        for term in ["crawl", "website", "extract", "structured", "profile"] {
+            assert!(
+                over[0].shared_terms.iter().any(|t| t == term),
+                "shared terms must list `{term}`: {:?}",
+                over[0].shared_terms
+            );
+        }
+        // Not also flagged as redundant or superseded.
+        assert!(
+            c.iter()
+                .all(|c| c.relation != Relation::RedundantWith
+                    && c.relation != Relation::SupersededBy)
         );
     }
 

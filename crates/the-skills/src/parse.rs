@@ -630,7 +630,9 @@ pub fn lint(p: &Parsed, dir_name: &str) -> Vec<Problem> {
             ));
         }
         // A description long enough to pass the terse check can still be generic filler; a vague
-        // phrase gives an agent nothing concrete to route on.
+        // phrase gives an agent nothing concrete to route on. (A distinctive-token-count floor was
+        // considered for TRIG1 but rejected: it flags this project's canonical-good terse descriptions
+        // like "Work with PDFs." -- see terse_description_is_flagged_but_minimal_real_ones_pass.)
         Some(d) => {
             if let Some(phrase) = vague_description_phrase(d) {
                 out.push(Problem::new(

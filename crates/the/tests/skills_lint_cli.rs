@@ -78,6 +78,29 @@ impl Fixture {
             .filter_map(|p| p["code"].as_str().map(str::to_owned))
             .collect()
     }
+
+    /// Raw stderr of a `the skills lint [--beta]` run (where corpus-level diagnostics like
+    /// `skill-overlap` / `redundant-with` are emitted, separate from the per-skill lint array).
+    fn lint_stderr(&self, beta: bool) -> String {
+        let mut args = vec![
+            "skills".to_string(),
+            "lint".to_string(),
+            "--dir".to_string(),
+            self.root.to_string_lossy().into_owned(),
+            "--scope".to_string(),
+            "dir".to_string(),
+            "--format".to_string(),
+            "json".to_string(),
+        ];
+        if beta {
+            args.push("--beta".to_string());
+        }
+        let out = Command::new(env!("CARGO_BIN_EXE_the"))
+            .args(&args)
+            .output()
+            .expect("run the skills lint");
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    }
 }
 
 impl Drop for Fixture {
@@ -158,6 +181,29 @@ fn a_clean_skill_has_no_beta_findings() {
     );
     // Guard the helper itself against a silent miss: the clean skill really is discovered.
     let _ = Path::new(env!("CARGO_BIN_EXE_the"));
+}
+
+#[test]
+fn skill_overlap_fires_through_the_cli_only_with_beta() {
+    // Two skills with similar (not duplicate) descriptions: a routing-collision (TRIG2). Corpus-level,
+    // so it is emitted as a stderr diagnostic, gated behind --beta like the other corpus rules.
+    let fx = Fixture::new();
+    fx.write(
+        "alpha/SKILL.md",
+        "---\nname: alpha\ndescription: crawl website extract structured profile data report json\n---\n\n# Alpha\n\nBody.\n",
+    );
+    fx.write(
+        "bravo/SKILL.md",
+        "---\nname: bravo\ndescription: crawl website extract structured profile output format markdown\n---\n\n# Bravo\n\nBody.\n",
+    );
+    assert!(
+        !fx.lint_stderr(false).contains("skill-overlap"),
+        "skill-overlap must be gated behind --beta"
+    );
+    assert!(
+        fx.lint_stderr(true).contains("skill-overlap"),
+        "skill-overlap must surface with --beta"
+    );
 }
 
 #[test]
