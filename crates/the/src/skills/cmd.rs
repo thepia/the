@@ -970,16 +970,27 @@ fn lint_table(skills: &[&Skill], beta: bool) -> Table {
                 codes.push(p.code.to_owned());
             }
         }
+        // A frontmatter parse error (e.g. duplicate-frontmatter-key, frontmatter-invalid) otherwise
+        // surfaces only when an installed agent skips the skill; include it directly so linting a
+        // directory still flags it. Deduped: a real agent-root skill already has it from the skip above.
+        let fe = s.parsed.frontmatter_error.as_ref();
+        if let Some(p) = fe
+            && !codes.iter().any(|c| c == p.code)
+        {
+            codes.push(p.code.to_owned());
+        }
 
-        let has_error = lint.iter().any(|p| p.is_error());
-        let has_warning = s.agents.iter().any(|v| {
-            matches!(
-                v.status,
-                Status::Skipped(_) | Status::Conflict { .. } | Status::Unknown(_)
-            )
-        }) || lint
-            .iter()
-            .any(|p| !p.is_error() && p.kind() != ProblemKind::Spec);
+        let has_error = lint.iter().any(|p| p.is_error()) || fe.is_some_and(Problem::is_error);
+        let has_warning = fe.is_some_and(|p| !p.is_error())
+            || s.agents.iter().any(|v| {
+                matches!(
+                    v.status,
+                    Status::Skipped(_) | Status::Conflict { .. } | Status::Unknown(_)
+                )
+            })
+            || lint
+                .iter()
+                .any(|p| !p.is_error() && p.kind() != ProblemKind::Spec);
         let status = if has_error {
             Cell::toned(Tone::Fail, "error")
         } else if has_warning {

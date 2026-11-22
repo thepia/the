@@ -28,6 +28,13 @@ const COMPATIBILITY_MAX: usize = 500;
 const DESCRIPTION_MIN_WORDS: usize = 3;
 const DESCRIPTION_TERSE_MAX: usize = 40;
 
+/// Claude Code `effort:` levels and the fields that must hold a boolean (frontmatter reference,
+/// code.claude.com/docs/en/skills, checked 2026-11-22). `model` and `agent` are deliberately absent:
+/// their valid values are open sets (any `/model` value; built-in or custom agents), so enumerating
+/// them would flag valid skills. Re-check when Claude Code changes these.
+const EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+const BOOL_FIELDS: &[&str] = &["disable-model-invocation", "user-invocable", "background"];
+
 /// Portable top-level keys defined by the Agent Skills (agentskills.io) specification.
 const SPEC_KEYS: &[&str] = &[
     "name",
@@ -205,12 +212,23 @@ pub fn parse(text: &str) -> Parsed {
         // Marker lines are 1-based within the frontmatter; +1 for the opening `---` gives the
         // SKILL.md line. Columns are 0-based.
         Err(e) => {
-            out.frontmatter_error = invalid(format!(
-                "invalid YAML at SKILL.md line {} column {}: {}",
-                e.marker().line() + 1,
-                e.marker().col() + 1,
-                e.info()
-            ))
+            // A duplicated top-level key is the common, specific cause: report it precisely, pointing
+            // at the second occurrence, rather than the generic parser error.
+            out.frontmatter_error = match first_duplicate_key(&yaml) {
+                Some((key, line)) => Some(
+                    Problem::new(
+                        "duplicate-frontmatter-key",
+                        format!("`{key}` is set more than once; only the last value is kept"),
+                    )
+                    .at_line(line),
+                ),
+                None => invalid(format!(
+                    "invalid YAML at SKILL.md line {} column {}: {}",
+                    e.marker().line() + 1,
+                    e.marker().col() + 1,
+                    e.info()
+                )),
+            }
         }
         Ok(docs) => match docs.into_iter().next() {
             None | Some(Yaml::Null) => {}
@@ -234,6 +252,47 @@ pub fn parse(text: &str) -> Parsed {
         },
     }
     out
+}
+
+/// The first duplicated top-level frontmatter key and the 1-based SKILL.md line of its second
+/// occurrence. `yaml` is the frontmatter body (after the opening `---`), so its line `i` (0-based) maps
+/// to SKILL.md line `i + 2`. Nested keys are indented, so only column-0 `key:` lines are considered.
+fn first_duplicate_key(yaml: &str) -> Option<(String, usize)> {
+    let mut seen = std::collections::BTreeSet::new();
+    for (i, line) in yaml.lines().enumerate() {
+        if line.starts_with([' ', '\t', '#']) {
+            continue;
+        }
+        let Some((key, _)) = line.split_once(':') else {
+            continue;
+        };
+        let key = key.trim();
+        if key.is_empty()
+            || !key
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+        {
+            continue;
+        }
+        if !seen.insert(key.to_owned()) {
+            return Some((key.to_owned(), i + 2));
+        }
+    }
+    None
+}
+
+/// Whether a value is an accepted boolean for a Claude Code boolean field: a YAML bool, `0`/`1`, or a
+/// string `yes`/`no`/`on`/`off`/`true`/`false`/`1`/`0` (case-insensitive), per the frontmatter reference.
+fn is_boolean_like(v: &Value) -> bool {
+    match v {
+        Value::Bool(_) => true,
+        Value::Number(n) => n.as_i64() == Some(0) || n.as_i64() == Some(1),
+        Value::String(s) => matches!(
+            s.to_ascii_lowercase().as_str(),
+            "yes" | "no" | "on" | "off" | "true" | "false" | "1" | "0"
+        ),
+        _ => false,
+    }
 }
 
 fn to_json(y: Yaml) -> Value {
@@ -590,6 +649,50 @@ pub fn lint(p: &Parsed, dir_name: &str) -> Vec<Problem> {
             ));
         }
     }
+    // Angle brackets in the description break Codex's skill parser.
+    if let Some(d) = p.str_field("description")
+        && (d.contains('<') || d.contains('>'))
+    {
+        out.push(Problem::new(
+            "description-angle-brackets",
+            "`description` contains `<` or `>`, which breaks Codex's skill parser",
+        ));
+    }
+    // Claude Code extended field values (closed sets / type / dependency; open sets are not checked).
+    if let Some(v) = p.frontmatter.get("context")
+        && v.as_str() != Some("fork")
+    {
+        out.push(Problem::new(
+            "context-invalid",
+            "`context` must be `fork` (or omitted for the default inline behavior)",
+        ));
+    }
+    if let Some(v) = p.frontmatter.get("effort")
+        && !v.as_str().is_some_and(|s| EFFORT_LEVELS.contains(&s))
+    {
+        out.push(Problem::new(
+            "effort-invalid",
+            "`effort` must be one of `low`, `medium`, `high`, `xhigh`, `max`",
+        ));
+    }
+    if p.frontmatter.contains_key("agent")
+        && p.frontmatter.get("context").and_then(Value::as_str) != Some("fork")
+    {
+        out.push(Problem::new(
+            "agent-without-context",
+            "`agent` is only used by a forked skill; add `context: fork` or remove `agent`",
+        ));
+    }
+    for field in BOOL_FIELDS {
+        if let Some(v) = p.frontmatter.get(*field)
+            && !is_boolean_like(v)
+        {
+            out.push(Problem::new(
+                "non-boolean-field",
+                format!("`{field}` must be a boolean (true/false, yes/no, on/off, or 1/0)"),
+            ));
+        }
+    }
     // Placeholder / template markers left in the body: the skill looks unfinished.
     if let Some(marker) = unfinished_marker(&p.body) {
         out.push(Problem::new(
@@ -678,6 +781,63 @@ mod tests {
             .contains(&"trailing-newline"),
             "a body-less skill with one trailing newline must be accepted"
         );
+    }
+
+    #[test]
+    fn duplicate_frontmatter_key_points_at_the_second_occurrence() {
+        // `name` is on SKILL.md lines 2 and 3; the dup is reported specifically, pointed at line 3.
+        let p = parse("---\nname: a\nname: b\ndescription: x\n---\n\nB.\n");
+        let e = p.frontmatter_error.as_ref().unwrap();
+        assert_eq!(e.code, "duplicate-frontmatter-key");
+        assert_eq!(e.line, Some(3));
+        assert!(e.message.contains("`name`"), "{}", e.message);
+        // A non-duplicate YAML error still reports as the generic frontmatter-invalid.
+        assert_eq!(
+            err_code(&parse("---\n? [a, b]: v\n---\n")),
+            Some("frontmatter-invalid")
+        );
+    }
+
+    #[test]
+    fn description_angle_brackets_flag_codex_breakage() {
+        let f = |d: &str| {
+            codes(&lint(
+                &parse(&format!("---\nname: a\ndescription: {d}\n---\n\nB.\n")),
+                "a",
+            ))
+            .contains(&"description-angle-brackets")
+        };
+        assert!(f("Render <div> templates"));
+        assert!(!f("Render HTML templates")); // plain prose does not fire
+    }
+
+    #[test]
+    fn claude_code_field_values_are_validated() {
+        let l = |fm: &str| {
+            codes(&lint(
+                &parse(&format!(
+                    "---\nname: a\ndescription: a clear useful tool\n{fm}\n---\n\nB.\n"
+                )),
+                "a",
+            ))
+        };
+        // context: closed set {fork}.
+        assert!(l("context: inline").contains(&"context-invalid"));
+        assert!(!l("context: fork").contains(&"context-invalid"));
+        // effort: closed set.
+        assert!(l("effort: ultra").contains(&"effort-invalid"));
+        assert!(!l("effort: xhigh").contains(&"effort-invalid"));
+        // agent is only used with context: fork.
+        assert!(l("agent: Explore").contains(&"agent-without-context"));
+        assert!(!l("context: fork\nagent: Explore").contains(&"agent-without-context"));
+        // boolean fields accept true/false, yes/no, on/off, 1/0; anything else is flagged.
+        assert!(l("user-invocable: maybe").contains(&"non-boolean-field"));
+        for good in ["true", "false", "yes", "no", "on", "off", "1", "0"] {
+            assert!(
+                !l(&format!("user-invocable: {good}")).contains(&"non-boolean-field"),
+                "`{good}` is a valid boolean form"
+            );
+        }
     }
 
     #[test]
