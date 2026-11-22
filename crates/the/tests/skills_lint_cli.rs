@@ -79,6 +79,29 @@ impl Fixture {
             .collect()
     }
 
+    /// Run `the skills lint <positional> --format json` and return the names of the skills found.
+    fn skill_names_positional(&self, positional: &str) -> Vec<String> {
+        let out = Command::new(env!("CARGO_BIN_EXE_the"))
+            .args(["skills", "lint", positional, "--format", "json"])
+            .output()
+            .expect("run the skills lint <positional>");
+        let doc: Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+            panic!(
+                "parse json: {e}\nstdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            )
+        });
+        doc["skills"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|s| s["name"].as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Raw stderr of a `the skills lint [--beta]` run (where corpus-level diagnostics like
     /// `skill-overlap` / `redundant-with` are emitted, separate from the per-skill lint array).
     fn lint_stderr(&self, beta: bool) -> String {
@@ -203,6 +226,34 @@ fn skill_overlap_fires_through_the_cli_only_with_beta() {
     assert!(
         fx.lint_stderr(true).contains("skill-overlap"),
         "skill-overlap must surface with --beta"
+    );
+}
+
+#[test]
+fn positional_path_lints_a_project_and_a_skills_root() {
+    // A PROJECT layout: the skill lives under .claude/skills, NOT as a direct child of the root. A
+    // positional project path must still discover it (the user should not have to name the subdir).
+    let proj = Fixture::new();
+    proj.write(
+        ".claude/skills/demo/SKILL.md",
+        "---\nname: demo\ndescription: Split a PDF into one file per page on request.\n---\n\n# Demo\n",
+    );
+    let names = proj.skill_names_positional(&proj.root.to_string_lossy());
+    assert!(
+        names.contains(&"demo".to_string()),
+        "a positional PROJECT path must discover .claude/skills/demo: {names:?}"
+    );
+
+    // A SKILLS-root layout (skills are direct children): the same positional path still works.
+    let root = Fixture::new();
+    root.write(
+        "alpha/SKILL.md",
+        "---\nname: alpha\ndescription: Crawl a site and extract a structured profile.\n---\n\n# Alpha\n",
+    );
+    let names = root.skill_names_positional(&root.root.to_string_lossy());
+    assert!(
+        names.contains(&"alpha".to_string()),
+        "a positional SKILLS-root path must discover direct-child skills: {names:?}"
     );
 }
 

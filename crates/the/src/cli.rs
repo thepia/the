@@ -62,11 +62,19 @@ pub enum SkillsCmd {
         search: SearchArgs,
     },
     /// List the directories each agent searches for skills, and where symlinked ones lead.
-    Dirs(SearchArgs),
+    Dirs {
+        /// Optional directory or project PATH to scan instead of the agent search roots
+        /// (equivalent to `--dir <PATH> --scope dir`).
+        path: Option<PathBuf>,
+        #[command(flatten)]
+        search: SearchArgs,
+    },
     /// Lint skills for agent loadability, spec conformance, broken local links, and security hazards.
     Lint {
-        /// Optional skill name (frontmatter `name`, or its directory name) to lint a single skill.
-        name: Option<String>,
+        /// A skill name (frontmatter `name`, or its directory name) to lint one skill, OR a relative or
+        /// absolute PATH (one containing `/`, starting with `~`, or `.`/`..`) to lint the skills in that
+        /// directory or project (equivalent to `--dir <PATH> --scope dir`).
+        target: Option<String>,
         #[command(flatten)]
         search: SearchArgs,
         /// Show every issue, not just the 5 most urgent.
@@ -92,6 +100,10 @@ pub enum ListForm {
 
 #[derive(Debug, Args)]
 pub struct ListArgs {
+    /// Optional directory or project PATH to list skills from instead of the agent search roots
+    /// (equivalent to `--dir <PATH> --scope dir`).
+    pub path: Option<PathBuf>,
+
     #[command(flatten)]
     pub search: SearchArgs,
 
@@ -120,7 +132,7 @@ impl ListArgs {
     }
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Clone, Args)]
 pub struct SearchArgs {
     /// Also search this skills directory (each child directory holding a SKILL.md is a skill).
     /// Repeatable.

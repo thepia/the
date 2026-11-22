@@ -113,6 +113,42 @@ fn root(
     }
 }
 
+/// Skill-home subpaths a PROJECT root exposes, unioned across the agents' project conventions (see the
+/// per-agent `claude`/`gemini`/`opencode`/`goose` plans above). Pointing `--dir` (or the positional
+/// path) at a project root discovers skills from whichever of these exist, so the user need not name
+/// the `.../skills` subdir.
+const PROJECT_SKILL_HOMES: &[&str] = &[
+    ".claude/skills",
+    ".claude/skills/synced",
+    ".agents/skills",
+    ".gemini/skills",
+    ".goose/skills",
+    ".opencode/skill",
+    ".opencode/skills",
+];
+
+/// The `Dir`-scope roots for an explicit `--dir`/positional `<base>`. `<base>` is always included as a
+/// skills root (its direct children are skills), so pointing straight at a `.../skills` directory still
+/// works and a non-existent `--dir` still surfaces the `dir-not-found` warning. In addition, `<base>`
+/// is treated as a **project root**: each project skill-home under it that exists is added (recursively,
+/// VCS dirs skipped), so `--dir <project>` finds `.claude/skills/*` etc. without naming the subdir.
+fn dir_roots(base: &Path) -> Vec<SearchRoot> {
+    let mut roots = vec![root(
+        None,
+        Scope::Dir,
+        base.to_path_buf(),
+        Depth::OneLevel,
+        Hidden::Include,
+    )];
+    for sub in PROJECT_SKILL_HOMES {
+        let p = base.join(sub);
+        if p.is_dir() {
+            roots.push(root(None, Scope::Dir, p, Depth::Recursive, Hidden::SkipVcs));
+        }
+    }
+    roots
+}
+
 /// Every root to search for the given `agents` (each in its precedence order), then `--dir` roots.
 pub fn plan_for(env: &Env, agents: &[Agent], extra: &[PathBuf]) -> Vec<SearchRoot> {
     let mut roots = Vec::new();
@@ -125,18 +161,12 @@ pub fn plan_for(env: &Env, agents: &[Agent], extra: &[PathBuf]) -> Vec<SearchRoo
         }
     }
     for d in extra {
-        let path = if d.is_absolute() {
+        let base = if d.is_absolute() {
             d.clone()
         } else {
             env.cwd.join(d)
         };
-        roots.push(root(
-            None,
-            Scope::Dir,
-            path,
-            Depth::OneLevel,
-            Hidden::Include,
-        ));
+        roots.extend(dir_roots(&base));
     }
     roots
 }
@@ -309,6 +339,47 @@ mod tests {
             .filter(|r| r.agent == Some(agent))
             .map(|r| r.path.display().to_string())
             .collect()
+    }
+
+    fn dir_paths(roots: &[SearchRoot]) -> Vec<String> {
+        roots
+            .iter()
+            .filter(|r| r.agent.is_none())
+            .map(|r| r.path.display().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn a_dir_root_discovers_project_skill_homes_not_just_direct_children() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let base = std::env::temp_dir().join(format!(
+            "the-dirroot-ut-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::SeqCst)
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        // A PROJECT root: the skill lives at <base>/.claude/skills/foo, not as a direct child of base.
+        std::fs::create_dir_all(base.join(".claude/skills/foo")).unwrap();
+        std::fs::write(
+            base.join(".claude/skills/foo/SKILL.md"),
+            "---\nname: foo\n---\n",
+        )
+        .unwrap();
+
+        let roots = plan_for(&env("/cwd", &[]), &[], std::slice::from_ref(&base));
+        let dirs = dir_paths(&roots);
+        // base itself is a Dir root (the "skills root directly" case), AND its project skill-home is
+        // discovered (the "project root" case) so the user need not name the `.claude/skills` subdir.
+        assert!(
+            dirs.iter().any(|p| p == &base.display().to_string()),
+            "base must be a dir root: {dirs:?}"
+        );
+        assert!(
+            dirs.iter().any(|p| p.ends_with(".claude/skills")),
+            "a project root's .claude/skills must be discovered: {dirs:?}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

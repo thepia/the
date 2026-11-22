@@ -1,7 +1,7 @@
 //! `the skills list | show | dirs | lint`. Each builds a [`Report`]; rendering is format-independent.
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use serde_json::{Value, json};
@@ -21,26 +21,61 @@ use crate::table::{Block, Cell, Column, Human, Record, Report, Table, Tone};
 
 const DESCRIPTION_WIDTH: usize = 72;
 
+/// A positional target is a filesystem PATH (a scan root), not a skill name, when it is path-like: a
+/// skill `name` is a slug (lowercase letters, digits, single hyphens) that can never contain any of
+/// these, so the two never collide. Use `./name` to force a bare word to be read as a path.
+fn is_path_like(s: &str) -> bool {
+    s.contains('/') || s.contains('\\') || s.starts_with('~') || s == "." || s == ".."
+}
+
+/// `search` with `root` added as a `--dir` scan root and the scope defaulted to `dir` (so only that
+/// directory/project is scanned, not the agent roots), unless `--scope` was given explicitly.
+fn with_root(search: &SearchArgs, root: PathBuf) -> SearchArgs {
+    let mut s = search.clone();
+    s.dirs.push(root);
+    s.scope = s.scope.or(Some(Scope::Dir));
+    s
+}
+
+/// Fold an optional positional `<path>` (list/dirs) into the search as a scan root.
+fn with_positional(search: &SearchArgs, path: Option<PathBuf>) -> SearchArgs {
+    match path {
+        Some(p) => with_root(search, p),
+        None => search.clone(),
+    }
+}
+
 pub fn run(args: SkillsArgs, format: Format, h: Human) -> Result<ExitCode, Diagnostic> {
     match args.command {
         Some(SkillsCmd::List(list_args)) => {
-            list(&list_args.search, list_args.presentation(), format, h)?;
+            let form = list_args.presentation();
+            let search = with_positional(&list_args.search, list_args.path);
+            list(&search, form, format, h)?;
             Ok(ExitCode::SUCCESS)
         }
         Some(SkillsCmd::Show { name, search }) => {
             show(&name, &search, format, h)?;
             Ok(ExitCode::SUCCESS)
         }
-        Some(SkillsCmd::Dirs(search)) => {
+        Some(SkillsCmd::Dirs { path, search }) => {
+            let search = with_positional(&search, path);
             dirs(&search, format, h)?;
             Ok(ExitCode::SUCCESS)
         }
         Some(SkillsCmd::Lint {
-            name,
+            target,
             search,
             all,
             advice,
-        }) => lint(name.as_deref(), &search, all, advice, args.beta, format, h),
+        }) => lint(
+            target.as_deref(),
+            &search,
+            all,
+            advice,
+            args.beta,
+            format,
+            h,
+        ),
         None => {
             let form = if args.by_scope {
                 ListForm::ByScope
@@ -833,7 +868,7 @@ fn show_report(s: &Skill) -> Report {
 }
 
 fn lint(
-    name: Option<&str>,
+    target: Option<&str>,
     search: &SearchArgs,
     all: bool,
     advice: bool,
@@ -841,6 +876,13 @@ fn lint(
     format: Format,
     h: Human,
 ) -> Result<ExitCode, Diagnostic> {
+    // A path-like target (`.`, `./x`, `../p`, `/abs`) is a scan root (lint that directory/project); a
+    // bare word is a skill-name filter (lint that one skill).
+    let (search_owned, name): (SearchArgs, Option<&str>) = match target {
+        Some(t) if is_path_like(t) => (with_root(search, PathBuf::from(t)), None),
+        other => (search.clone(), other),
+    };
+    let search = &search_owned;
     let cat = catalog(search, format, true)?;
     let candidates = selected(&cat, search);
     let skills: Vec<&Skill> = match name {
