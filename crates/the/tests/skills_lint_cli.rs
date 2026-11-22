@@ -230,6 +230,73 @@ fn skill_overlap_fires_through_the_cli_only_with_beta() {
 }
 
 #[test]
+fn a_positional_path_keeps_the_user_scope_unless_no_user() {
+    // A fake user HOME holding a user-scope Claude skill, and a separate project to point at.
+    let home = Fixture::new();
+    home.write(
+        ".claude/skills/user-skill/SKILL.md",
+        "---\nname: user-skill\ndescription: A user's own skill for formatting local notes.\n---\n\n# U\n",
+    );
+    let proj = Fixture::new();
+    proj.write(
+        ".claude/skills/proj-skill/SKILL.md",
+        "---\nname: proj-skill\ndescription: A project skill for building the staging bundle.\n---\n\n# P\n",
+    );
+
+    // Run `the skills lint <proj> --agent claude [extra]` with HOME overridden to the fake home, so the
+    // user scope resolves into our fixture (and CLAUDE_CODE_DISABLE_POLICY_SKILLS avoids the real
+    // machine's managed skills). `--agent claude` forces Claude's user root to be planned regardless of
+    // what is installed, and gives the user skill a Claude verdict so it survives the agent filter.
+    let run = |extra: &[&str]| -> Vec<String> {
+        let mut args = vec![
+            "skills".to_string(),
+            "lint".to_string(),
+            proj.root.to_string_lossy().into_owned(),
+            "--agent".to_string(),
+            "claude".to_string(),
+            "--format".to_string(),
+            "json".to_string(),
+        ];
+        args.extend(extra.iter().map(|s| s.to_string()));
+        let out = Command::new(env!("CARGO_BIN_EXE_the"))
+            .args(&args)
+            .env("HOME", &home.root)
+            .env("CLAUDE_CODE_DISABLE_POLICY_SKILLS", "1")
+            .output()
+            .expect("run the skills lint");
+        let doc: Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+            panic!(
+                "parse json: {e}\nstderr: {}",
+                String::from_utf8_lossy(&out.stderr)
+            )
+        });
+        doc["skills"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|s| s["name"].as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    // The regression guard: pointing at a project path must NOT drop the user's own skills (the old
+    // code forced `--scope dir`, which excluded the user scope).
+    let default = run(&[]);
+    assert!(
+        default.contains(&"user-skill".to_string()),
+        "a positional project path must keep the user scope by default: {default:?}"
+    );
+
+    // `--no-user` excludes the user scope.
+    let no_user = run(&["--no-user"]);
+    assert!(
+        !no_user.contains(&"user-skill".to_string()),
+        "--no-user must exclude the user scope: {no_user:?}"
+    );
+}
+
+#[test]
 fn positional_path_lints_a_project_and_a_skills_root() {
     // A PROJECT layout: the skill lives under .claude/skills, NOT as a direct child of the root. A
     // positional project path must still discover it (the user should not have to name the subdir).

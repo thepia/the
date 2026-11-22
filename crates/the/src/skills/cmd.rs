@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use super::analysis::corpus_findings;
 use super::fix::{self, Advice, FixClass};
 use super::installed::installed_agents;
-use super::locate::{Env, plan, plan_for};
+use super::locate::{Env, SearchRoot, plan, plan_for};
 use super::parse::{Problem, ProblemKind};
 use super::resolve::{Catalog, RootInfo, Skill, Status, build, build_for};
 use super::{Agent, Scope, bundled_files};
@@ -28,12 +28,12 @@ fn is_path_like(s: &str) -> bool {
     s.contains('/') || s.contains('\\') || s.starts_with('~') || s == "." || s == ".."
 }
 
-/// `search` with `root` added as a `--dir` scan root and the scope defaulted to `dir` (so only that
-/// directory/project is scanned, not the agent roots), unless `--scope` was given explicitly.
+/// `search` with `root` added as a `--dir` scan root. The positional path is additive, exactly like
+/// `--dir`: the agent roots (including the user's own skills) stay in the scan unless the caller
+/// narrows them with `--no-user` or `--scope dir`.
 fn with_root(search: &SearchArgs, root: PathBuf) -> SearchArgs {
     let mut s = search.clone();
     s.dirs.push(root);
-    s.scope = s.scope.or(Some(Scope::Dir));
     s
 }
 
@@ -43,6 +43,15 @@ fn with_positional(search: &SearchArgs, path: Option<PathBuf>) -> SearchArgs {
         Some(p) => with_root(search, p),
         None => search.clone(),
     }
+}
+
+/// Drop the user-scope roots (`~/.claude/skills` et al.) when `--no-user` is set, so a project/dir scan
+/// does not mix in the developer's personal skills. Project, system, and `--dir` roots are untouched.
+fn without_user(mut roots: Vec<SearchRoot>, no_user: bool) -> Vec<SearchRoot> {
+    if no_user {
+        roots.retain(|r| r.scope != Scope::User);
+    }
+    roots
 }
 
 pub fn run(args: SkillsArgs, format: Format, h: Human) -> Result<ExitCode, Diagnostic> {
@@ -126,9 +135,11 @@ fn catalog(
             agents.push(a);
             agents.sort();
         }
-        build_for(&plan_for(&env, &agents, &search.dirs), &agents)
+        let roots = without_user(plan_for(&env, &agents, &search.dirs), search.no_user);
+        build_for(&roots, &agents)
     } else {
-        build(&plan(&env, &search.dirs))
+        let roots = without_user(plan(&env, &search.dirs), search.no_user);
+        build(&roots)
     };
     for r in cat
         .roots
