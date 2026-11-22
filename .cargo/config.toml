@@ -1,0 +1,17 @@
+# Never incrementally cache the crates we edit and test.
+#
+# Cargo applies incremental compilation only to the local workspace crates (the-output, the-skills,
+# the), never to registry dependencies. Those workspace crates are exactly the ones under test, and a
+# half-updated incremental codegen unit can leave a binary where new code is linked in but an old call
+# path still runs (new strings present, stale behaviour) -- a bug that passes `cargo test` yet ships in
+# the built binary. It bit us once: a `the skills lint` rule fired in unit tests but not in the binary.
+#
+# Mixing incremental and non-incremental builds in the shared `target/` is how the stale unit survives,
+# which happens the moment any build runs without `scripts/sccache-env.sh` (it already sets
+# CARGO_INCREMENTAL=0). Pinning it here makes incremental=0 hold for EVERY entry point -- the `just`
+# recipes, a raw `cargo build`/`cargo test`, rust-analyzer, and the IDE -- so there is nothing to mix.
+#
+# sccache still caches the heavy dependencies (goose, tokio, iroh) via sccache-env.sh; that is where the
+# speedup is and it was never the problem. A cold workspace-crate rebuild is cheap (~seconds).
+[build]
+incremental = false
