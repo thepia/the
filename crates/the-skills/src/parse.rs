@@ -87,6 +87,8 @@ pub enum ProblemKind {
 pub struct Problem {
     pub code: &'static str,
     pub message: String,
+    /// Why it matters: the concrete consequence (from the rule registry).
+    pub why: &'static str,
     /// How to fix it.
     pub fix: &'static str,
     /// The 1-based SKILL.md line this problem points at, when it has a source location (link, asset,
@@ -102,13 +104,13 @@ pub struct Problem {
 impl Problem {
     pub fn new(code: &'static str, message: impl Into<String>) -> Self {
         // Single source of truth: the rule registry (the-skills `rules`), not a parallel match.
-        let fix = crate::rules::rule(code)
-            .unwrap_or_else(|| unreachable!("every problem code is in the rule registry: {code}"))
-            .fix;
+        let rule = crate::rules::rule(code)
+            .unwrap_or_else(|| unreachable!("every problem code is in the rule registry: {code}"));
         Self {
             code,
             message: message.into(),
-            fix,
+            why: rule.why,
+            fix: rule.fix,
             line: None,
             col: None,
         }

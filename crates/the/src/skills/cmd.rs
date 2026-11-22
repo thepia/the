@@ -274,7 +274,13 @@ fn collect_diagnostics(skills: &[&Skill]) -> Vec<Diagnostic> {
                 (Some(line), None) => format!("{path}:{line}"),
                 _ => path.to_string(),
             };
-            out.push(d.context(location).cause(p.message.clone()).help(p.fix));
+            // what = title (label), why = the impact, fix = help. The specific message leads the
+            // cause, the registry's `why` states why it matters.
+            out.push(
+                d.context(location)
+                    .cause(format!("{}; {}", p.message, p.why))
+                    .help(p.fix),
+            );
         }
 
         let spec_lint: Vec<&Problem> = s
@@ -292,9 +298,9 @@ fn collect_diagnostics(skills: &[&Skill]) -> Vec<Diagnostic> {
                 .cause(
                     spec_lint
                         .iter()
-                        .map(|p| p.message.as_str())
+                        .map(|p| format!("{}; {}", p.message, p.why))
                         .collect::<Vec<_>>()
-                        .join("; "),
+                        .join(" | "),
                 )
                 .help(unique_fixes(spec_lint.iter().map(|p| p.fix))),
             );

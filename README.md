@@ -17,6 +17,17 @@ The release package is **`thepia`**, which installs the **`the`** CLI command (a
 
 Run `the --help` or `the <subcommand> --help` for usage details.
 
+### Why lint your skills
+
+A skill that is wrong does not error loudly; it is silently ignored, mis-routed, or quietly misbehaves mid-task. `the skills` catches that before it costs you a run:
+
+- **Catch mistakes early.** Invalid frontmatter, out-of-range field values, duplicate keys, and broken links are flagged at author time, not discovered when the agent fails to load or use the skill.
+- **Guard against injections and unsafe skills.** Hidden or bidirectional Unicode, exposed secrets, and over-broad shell permissions are flagged, with an opt-in deep security audit for skills you did not write.
+- **Improve your coding assistant's performance.** Description and trigger quality plus a token budget keep the agent routing to the *right* skill instead of burning context on a vague or bloated one.
+- **Works across every agent your team uses.** `the` models each agent's real discovery, so it tells you whether Claude Code, Gemini, OpenCode, or Goose will actually load a skill, or shadow, conflict with, or skip it, rather than assuming the one you tested.
+- **Stays portable and self-contained.** Links, assets, and paths are checked so a skill resolves on a teammate's machine, not just where it was written.
+- **Clear, fixable diagnostics.** Every finding states what is wrong, why it matters, and the exact fix, with no opaque letter grade.
+
 ## Install
 
 With Nix:
