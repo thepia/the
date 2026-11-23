@@ -20,3 +20,9 @@ pub mod diag;
 pub mod output;
 pub mod style;
 pub mod table;
+
+// The command pipeline contract (routable invocation, uniform `Target`/`Results` interface, a live
+// `Registry`, and a stream-injectable `dispatch`). Needs clap, so it rides the `cli` feature. A
+// command group is a crate implementing `command::Target`; the binary registers each one.
+#[cfg(feature = "cli")]
+pub mod command;

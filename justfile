@@ -61,8 +61,16 @@ fmt-check:
 links:
     lychee --offline --no-progress "*.md" "docs/**/*.md"
 
-# Everything CI checks on Rust: fmt-check + clippy + full tests.
-gate: fmt-check clippy test
+# Channel discipline: command crates must render through `Results`, never write output directly.
+command-channels:
+    ./scripts/check-command-channels.sh
+
+# Bump the workspace version (and internal path-dep pins) in lockstep: `just bump patch|minor|major`.
+bump level:
+    ./scripts/bump-version.sh {{level}}
+
+# Everything CI checks on Rust: fmt-check + clippy + command-channels + full tests.
+gate: fmt-check clippy command-channels test
 
 # Nix: build the package and run the flake checks (fmt, clippy, tests).
 nix-check:

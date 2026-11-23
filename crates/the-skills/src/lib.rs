@@ -4,8 +4,12 @@
 //! and Markdown instructions, optionally with bundled files. This crate finds every skill that Claude
 //! Code, OpenCode, Gemini or Goose would find from the current directory, imitating each agent's own
 //! search and load rules, reports per skill which agents load / shadow / skip it, lints it, and ranks
-//! cleanup candidates. Everything here is the logic; the CLI command + rendering layer stays in the
-//! binary (which renders through the `the-output` crate).
+//! cleanup candidates.
+//!
+//! This crate is the **self-contained `skills` command group**: besides the logic modules it owns its
+//! clap grammar ([`cli`]) and its command adapter ([`cmd`], which implements
+//! [`the_output::command::Target`] and renders through `the-output`). The binary just registers
+//! [`Skills`]. A command group is a crate.
 //!
 //! - [`locate`]: where each agent looks (search plan).
 //! - [`scan`]: finding SKILL.md files under a root; symlink detection.
@@ -15,8 +19,11 @@
 //! - [`fix`]: the per-issue repair-advice classification.
 //! - [`installed`]: which agent CLIs are installed.
 //! - [`analysis`]: corpus-level redundancy / supersession cleanup ranking.
+//! - [`cli`] / [`cmd`]: the command's arguments, execution, and rendering.
 
 pub mod analysis;
+pub mod cli;
+pub mod cmd;
 pub mod fix;
 pub mod installed;
 pub mod links;
@@ -27,6 +34,8 @@ pub mod resolve;
 pub mod rules;
 pub mod scan;
 pub mod smoke;
+
+pub use cmd::Skills;
 
 use std::fs;
 use std::path::Path;

@@ -253,7 +253,7 @@ dependencies = [
 
 [[package]]
 name = "the-output"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anstyle",
  "clap",
@@ -263,18 +263,19 @@ dependencies = [
 
 [[package]]
 name = "the-skills"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "clap",
  "serde",
  "serde_json",
+ "the-output",
  "unicode-normalization",
  "yaml-rust2",
 ]
 
 [[package]]
 name = "thepia"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "clap",
  "serde",
