@@ -140,20 +140,19 @@ fn build_skills(args: SkillsArgs, format: Format, h: Human) -> Result<Built, Dia
     match args.command {
         Some(SkillsCmd::List(list_args)) => {
             let form = list_args.presentation();
-            let search = with_positional(&list_args.search, list_args.path);
+            let search = with_positional(&args.search, list_args.path);
             build_list(&search, form, format, h, args.beta)
         }
-        Some(SkillsCmd::Show { name, search }) => build_show(&name, &search),
-        Some(SkillsCmd::Dirs { path, search }) => {
-            let search = with_positional(&search, path);
+        Some(SkillsCmd::Show { name }) => build_show(&name, &args.search),
+        Some(SkillsCmd::Dirs { path }) => {
+            let search = with_positional(&args.search, path);
             build_dirs(&search)
         }
         Some(SkillsCmd::Lint {
             target,
-            search,
             all,
             advice,
-        }) => build_lint(target.as_deref(), &search, all, advice, args.beta),
+        }) => build_lint(target.as_deref(), &args.search, all, advice, args.beta),
         Some(SkillsCmd::Path(tokens)) => {
             // A path (or paths) given instead of a subcommand: scan them like the bare `skills`,
             // additively onto the top-level search. A leading non-path token is a real typo.

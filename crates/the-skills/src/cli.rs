@@ -34,16 +34,12 @@ pub enum SkillsCmd {
     Show {
         /// The skill's name (frontmatter `name`, or its directory name).
         name: String,
-        #[command(flatten)]
-        search: SearchArgs,
     },
     /// List the directories each agent searches for skills, and where symlinked ones lead.
     Dirs {
         /// Optional directory or project PATH to also scan (equivalent to `--dir <PATH>`; the user's
         /// own skills are still included unless `--no-user`).
         path: Option<PathBuf>,
-        #[command(flatten)]
-        search: SearchArgs,
     },
     /// Lint skills for agent loadability, spec conformance, broken local links, and security hazards.
     Lint {
@@ -52,8 +48,6 @@ pub enum SkillsCmd {
         /// that directory or project (equivalent to `--dir <PATH>`; the user's own skills are still
         /// included unless `--no-user`, and `--scope dir` restricts to just the given path).
         target: Option<String>,
-        #[command(flatten)]
-        search: SearchArgs,
         /// Show every issue, not just the 5 most urgent.
         #[arg(long)]
         all: bool,
@@ -87,9 +81,6 @@ pub struct ListArgs {
     /// user's own skills are still included unless `--no-user`).
     pub path: Option<PathBuf>,
 
-    #[command(flatten)]
-    pub search: SearchArgs,
-
     /// Human presentation form (`tabular`, `prose`, or `by-scope`).
     #[arg(long, value_enum, default_value_t = ListForm::Tabular)]
     pub form: ListForm,
@@ -115,22 +106,25 @@ impl ListArgs {
     }
 }
 
+/// The scan-scope flags shared by every `skills` subcommand. They are `global`, so they may be placed
+/// before or after the subcommand (`the skills --dir x lint` and `the skills lint --dir x` both work)
+/// and are defined once rather than duplicated per subcommand.
 #[derive(Debug, Clone, Args)]
 pub struct SearchArgs {
     /// Also search this skills directory or project root (each child holding a SKILL.md is a skill, and
     /// a project's `.claude/skills`, `.agents/skills`, ... are discovered under it). Repeatable.
-    #[arg(long = "dir", value_name = "PATH")]
+    #[arg(long = "dir", value_name = "PATH", global = true)]
     pub dirs: Vec<PathBuf>,
 
     /// Only consider this scope.
-    #[arg(long, value_enum)]
+    #[arg(long, value_enum, global = true)]
     pub scope: Option<Scope>,
 
     /// Exclude the user's own skills (`~/.claude/skills` and the other per-agent user roots) from the scan.
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub no_user: bool,
 
     /// Only what this agent loads (for `dirs`: only where it searches).
-    #[arg(long, value_enum)]
+    #[arg(long, value_enum, global = true)]
     pub agent: Option<Agent>,
 }
