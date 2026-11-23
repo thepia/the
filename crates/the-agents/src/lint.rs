@@ -14,6 +14,7 @@ use the_skills::parse::{Parsed, name_format_ok};
 
 use crate::keys;
 use crate::rules::{self, Severity};
+use crate::{Assistant, assistants};
 
 /// A single lint finding against an agent definition: the rule `code` (its `why`/`fix`/severity come
 /// from the [registry](crate::rules)), a specific message, and an optional source location.
@@ -65,12 +66,25 @@ const VAGUE_PHRASES: &[&str] = &[
 ];
 
 /// Lint one parsed agent definition. `raw` is the file text (for security smoke), `file_stem` is the
-/// file name without `.md` (for the name-vs-file check), and `parent` is the directory the file sits in.
-/// Returns every finding, including beta-staged ones; the caller filters by `--beta`.
-pub fn lint(parsed: &Parsed, raw: &str, file_stem: &str, parent: &Path) -> Vec<Finding> {
+/// file name without `.md` (for the name-vs-file check), `parent` is the directory the file sits in, and
+/// `assistant` is the runtime whose directory it came from. Returns every finding, including beta-staged
+/// ones; the caller filters by `--beta`.
+///
+/// The **universal** checks (frontmatter parse, security smoke) run for every assistant. The
+/// Claude-specific field rules (name/description quality, the Claude key schema) run only on Claude
+/// definitions, because other assistants' schemas differ (OpenCode derives the name from the filename
+/// and uses object-valued `tools`; Gemini uses `kind`/`mcpServers`; pi uses `thinking`). Linting them
+/// with Claude rules would reintroduce false positives; each assistant's own rules light up as added.
+pub fn lint(
+    parsed: &Parsed,
+    raw: &str,
+    file_stem: &str,
+    parent: &Path,
+    assistant: &'static Assistant,
+) -> Vec<Finding> {
     let mut out = Vec::new();
 
-    // A frontmatter parse/structure error means no fields can be trusted: report it and stop.
+    // A frontmatter parse/structure error means no fields can be trusted: report it and stop. Universal.
     if let Some(p) = &parsed.frontmatter_error {
         let code = if p.code == "no-frontmatter" {
             "agent-no-frontmatter"
@@ -81,9 +95,13 @@ pub fn lint(parsed: &Parsed, raw: &str, file_stem: &str, parent: &Path) -> Vec<F
         return out;
     }
 
-    check_name(parsed, file_stem, &mut out);
-    check_description(parsed, &mut out);
-    check_fields(parsed, &mut out);
+    // Claude-specific field rules: only for Claude definitions (see the doc comment).
+    if assistant.id == assistants::claude().id {
+        check_name(parsed, file_stem, &mut out);
+        check_description(parsed, &mut out);
+        check_fields(parsed, &mut out);
+    }
+    // Security smoke is universal (a secret or hidden control char is a hazard in any definition).
     check_security(parsed, raw, parent, &mut out);
     out
 }
@@ -260,10 +278,16 @@ mod tests {
 
     fn codes(fm_and_body: &str, stem: &str) -> Vec<&'static str> {
         let parsed = parse(fm_and_body);
-        lint(&parsed, fm_and_body, stem, Path::new("/tmp"))
-            .into_iter()
-            .map(|f| f.code)
-            .collect()
+        lint(
+            &parsed,
+            fm_and_body,
+            stem,
+            Path::new("/tmp"),
+            assistants::claude(),
+        )
+        .into_iter()
+        .map(|f| f.code)
+        .collect()
     }
 
     #[test]
@@ -339,7 +363,7 @@ mod tests {
         // A live-shaped AWS key (no placeholder marker like `example`/`test`, which smoke excludes).
         let text = "---\nname: x\ndescription: a real sentence about what it does and when\n---\nUse AWS key AKIA2E4RZ7KQ9X1V3B8N here\n";
         let parsed = parse(text);
-        let fs = lint(&parsed, text, "x", Path::new("/tmp"));
+        let fs = lint(&parsed, text, "x", Path::new("/tmp"), assistants::claude());
         let secret = fs.iter().find(|f| f.code == "exposed-secret");
         assert!(secret.is_some(), "a credential literal is flagged: {fs:?}");
         assert!(secret.unwrap().is_error());

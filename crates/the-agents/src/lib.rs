@@ -24,6 +24,7 @@
 //! - [`lint`]: field validity, delegation quality, and reused security smoke for one definition.
 //! - [`cli`] / [`cmd`]: the command's arguments, execution, and rendering.
 
+pub mod assistants;
 pub mod cli;
 pub mod cmd;
 pub mod discover;
@@ -31,6 +32,7 @@ pub mod keys;
 pub mod lint;
 pub mod rules;
 
+pub use assistants::Assistant;
 pub use cmd::Agents;
 
 use std::path::PathBuf;
@@ -41,42 +43,18 @@ use the_skills::parse::Parsed;
 // parallel enum. `System` is unused for agent definitions (no machine-wide managed agents today).
 pub use the_skills::Scope;
 
-/// The coding-assistant runtime an agent definition belongs to, identified by where it keeps its
-/// definitions. Only Claude Code is wired today; the enum exists so discovery and output already carry
-/// the dimension when a second runtime's location is added (a new variant plus its subdirectory), not
-/// as an empty abstraction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Runtime {
-    /// Claude Code: `.claude/agents/*.md`.
-    Claude,
-}
-
-impl Runtime {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Runtime::Claude => "claude",
-        }
-    }
-
-    /// The directory, relative to a project or user root, where this runtime keeps agent definitions.
-    pub fn subdir(self) -> &'static str {
-        match self {
-            Runtime::Claude => ".claude/agents",
-        }
-    }
-}
-
 /// One discovered agent definition: a single `*.md` file, parsed, with its computed lint findings.
 #[derive(Debug)]
 pub struct AgentDef {
     /// The addressable name: the frontmatter `name`, falling back to the file stem when absent.
     pub name: String,
-    /// The file name without its `.md` extension (the runtime lists the agent by this).
+    /// The file name without its `.md` extension (the assistant lists the agent by this).
     pub file_stem: String,
     /// The definition file.
     pub path: PathBuf,
     pub scope: Scope,
-    pub runtime: Runtime,
+    /// The assistant whose directory this definition was found in (and whose field rules apply).
+    pub assistant: &'static Assistant,
     /// The parsed frontmatter and body.
     pub parsed: Parsed,
     /// The lint findings for this definition (computed once at discovery).
@@ -125,16 +103,10 @@ mod tests {
             file_stem: "x".into(),
             path: PathBuf::from("/tmp/x.md"),
             scope: Scope::Dir,
-            runtime: Runtime::Claude,
+            assistant: assistants::claude(),
             parsed: parse(frontmatter_and_body),
             findings: Vec::new(),
         }
-    }
-
-    #[test]
-    fn runtime_strings() {
-        assert_eq!(Runtime::Claude.as_str(), "claude");
-        assert_eq!(Runtime::Claude.subdir(), ".claude/agents");
     }
 
     #[test]

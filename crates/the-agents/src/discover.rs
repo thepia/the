@@ -1,22 +1,24 @@
-//! Where each runtime keeps agent definitions, and reading them into [`AgentDef`]s.
+//! Where each assistant keeps agent definitions, and reading them into [`AgentDef`]s.
 //!
-//! A definition is a single `*.md` file in an agents directory. Claude Code uses `.claude/agents`, in
-//! the project (the current directory and its ancestors up to the home directory) and in the user's
-//! home. A `--dir PATH` adds `PATH` itself and `PATH/.claude/agents` as extra roots, so a project or a
-//! bare agents directory can be scanned explicitly (and hermetically, with `--scope dir`).
+//! A definition is a single `*.md` file in an assistant's agents directory. Discovery folds over the
+//! [assistant registry](crate::assistants): for each assistant it scans the project
+//! (`<project_subdir>` from the cwd up to the home directory) and the user (`$HOME/<user_subdir>`,
+//! unless `no_user`). A `--dir PATH` adds `PATH` itself (as Claude, the default for a bare directory of
+//! agent files) plus `PATH/<project_subdir>` per assistant, so a project or a bare agents directory can
+//! be scanned explicitly (and hermetically, with `--scope dir`).
 
 use std::path::{Path, PathBuf};
 
 use the_skills::locate::Env;
 
-use crate::{AgentDef, Runtime, Scope, lint};
+use crate::{AgentDef, Assistant, Scope, assistants, lint};
 
 /// One directory that may hold agent definitions.
 #[derive(Debug, Clone)]
 pub struct Root {
     pub path: PathBuf,
     pub scope: Scope,
-    pub runtime: Runtime,
+    pub assistant: &'static Assistant,
     /// The directory exists (only existing roots are scanned; a missing `--dir` is reported).
     pub exists: bool,
 }
@@ -28,56 +30,54 @@ pub struct ReadError {
     pub error: String,
 }
 
-/// Resolve the directories to scan: project (`.claude/agents` from the cwd up to, but not including,
-/// the home directory), user (`~/.claude/agents`, unless `no_user`), and one or two roots per `--dir`.
-/// The home directory ends the project walk so its agents are the single User root, never double-counted.
+fn root(path: PathBuf, scope: Scope, assistant: &'static Assistant) -> Root {
+    let exists = path.is_dir();
+    Root {
+        path,
+        scope,
+        assistant,
+        exists,
+    }
+}
+
+/// Resolve the directories to scan across every registered assistant: project (`<project_subdir>` from
+/// the cwd up to, but not including, the home directory), user (`$HOME/<user_subdir>`, unless
+/// `no_user`), and the `--dir` roots. The home directory ends the project walk so a home-level dir is
+/// the single User root, never double-counted.
 pub fn roots(env: &Env, dirs: &[PathBuf], no_user: bool) -> Vec<Root> {
     let mut roots = Vec::new();
 
-    // Project: the cwd and each ancestor, stopping at the home directory (exclusive).
-    for dir in env.cwd.ancestors() {
-        if env.home.as_deref() == Some(dir) {
-            break;
+    for assistant in assistants::ASSISTANTS {
+        // Project: the cwd and each ancestor, stopping at the home directory (exclusive).
+        for dir in env.cwd.ancestors() {
+            if env.home.as_deref() == Some(dir) {
+                break;
+            }
+            roots.push(root(
+                dir.join(assistant.project_subdir),
+                Scope::Project,
+                assistant,
+            ));
         }
-        let path = dir.join(Runtime::Claude.subdir());
-        let exists = path.is_dir();
-        roots.push(Root {
-            path,
-            scope: Scope::Project,
-            runtime: Runtime::Claude,
-            exists,
-        });
+        // User.
+        if !no_user && let Some(home) = &env.home {
+            roots.push(root(
+                home.join(assistant.user_subdir),
+                Scope::User,
+                assistant,
+            ));
+        }
     }
 
-    // User.
-    if !no_user && let Some(home) = &env.home {
-        let path = home.join(Runtime::Claude.subdir());
-        let exists = path.is_dir();
-        roots.push(Root {
-            path,
-            scope: Scope::User,
-            runtime: Runtime::Claude,
-            exists,
-        });
-    }
-
-    // Each `--dir`: the directory itself, and its `.claude/agents` subdirectory.
+    // Each `--dir`: the directory itself (Claude rules, the default for a bare agents dir) plus each
+    // assistant's project subdirectory under it.
     for d in dirs {
-        roots.push(Root {
-            path: d.clone(),
-            scope: Scope::Dir,
-            runtime: Runtime::Claude,
-            exists: d.is_dir(),
-        });
-        let sub = d.join(Runtime::Claude.subdir());
-        if &sub != d {
-            let exists = sub.is_dir();
-            roots.push(Root {
-                path: sub,
-                scope: Scope::Dir,
-                runtime: Runtime::Claude,
-                exists,
-            });
+        roots.push(root(d.clone(), Scope::Dir, assistants::claude()));
+        for assistant in assistants::ASSISTANTS {
+            let sub = d.join(assistant.project_subdir);
+            if &sub != d {
+                roots.push(root(sub, Scope::Dir, assistant));
+            }
         }
     }
 
@@ -109,7 +109,7 @@ pub fn discover(roots: &[Root]) -> (Vec<AgentDef>, Vec<ReadError>) {
         files.sort();
         for path in files {
             match std::fs::read_to_string(&path) {
-                Ok(raw) => defs.push(build_def(path, &raw, root.scope, root.runtime)),
+                Ok(raw) => defs.push(build_def(path, &raw, root.scope, root.assistant)),
                 Err(e) => errors.push(ReadError {
                     path,
                     error: e.to_string(),
@@ -120,7 +120,7 @@ pub fn discover(roots: &[Root]) -> (Vec<AgentDef>, Vec<ReadError>) {
     (defs, errors)
 }
 
-fn build_def(path: PathBuf, raw: &str, scope: Scope, runtime: Runtime) -> AgentDef {
+fn build_def(path: PathBuf, raw: &str, scope: Scope, assistant: &'static Assistant) -> AgentDef {
     let parsed = the_skills::parse::parse(raw);
     let file_stem = path
         .file_stem()
@@ -132,13 +132,13 @@ fn build_def(path: PathBuf, raw: &str, scope: Scope, runtime: Runtime) -> AgentD
         .filter(|n| !n.is_empty())
         .map_or_else(|| file_stem.clone(), ToOwned::to_owned);
     let parent = path.parent().unwrap_or(Path::new("."));
-    let findings = lint::lint(&parsed, raw, &file_stem, parent);
+    let findings = lint::lint(&parsed, raw, &file_stem, parent, assistant);
     AgentDef {
         name,
         file_stem,
         path,
         scope,
-        runtime,
+        assistant,
         parsed,
         findings,
     }
@@ -170,12 +170,7 @@ mod tests {
         // A non-.md file is ignored.
         write(&dir, "notes.txt", "ignore me\n");
 
-        let roots = vec![Root {
-            path: dir.clone(),
-            scope: Scope::Dir,
-            runtime: Runtime::Claude,
-            exists: true,
-        }];
+        let roots = vec![root(dir.clone(), Scope::Dir, assistants::claude())];
         let (defs, errors) = discover(&roots);
         assert!(errors.is_empty());
         assert_eq!(defs.len(), 2, "two .md definitions discovered");
@@ -208,21 +203,40 @@ mod tests {
     fn roots_for_dir(p: &str) -> Vec<Root> {
         // Build only the Dir roots for `p` (bypass env-dependent project/user roots).
         let d = PathBuf::from(p);
-        let sub = d.join(Runtime::Claude.subdir());
+        let sub = d.join(assistants::claude().project_subdir);
         vec![
-            Root {
-                path: d.clone(),
-                scope: Scope::Dir,
-                runtime: Runtime::Claude,
-                exists: d.is_dir(),
-            },
-            Root {
-                path: sub.clone(),
-                scope: Scope::Dir,
-                runtime: Runtime::Claude,
-                exists: sub.is_dir(),
-            },
+            root(d.clone(), Scope::Dir, assistants::claude()),
+            root(sub, Scope::Dir, assistants::claude()),
         ]
+    }
+
+    #[test]
+    fn non_claude_definitions_get_universal_checks_only() {
+        // An OpenCode-style definition (no `name` field; `mode: subagent`, an unknown key for Claude,
+        // and a terse description) must NOT trip the Claude-specific name/description/key rules, because
+        // its schema is different. It is still discovered, tagged with its assistant, and security-smoked.
+        let dir = std::env::temp_dir().join(format!("the-agents-opencode-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        write(
+            &dir,
+            "review.md",
+            "---\ndescription: Reviews code\nmode: subagent\n---\n# body\n",
+        );
+        let roots = vec![root(
+            dir.clone(),
+            Scope::Dir,
+            assistants::by_id("opencode").unwrap(),
+        )];
+        let (defs, _) = discover(&roots);
+        assert_eq!(defs[0].assistant.id, "opencode");
+        assert_eq!(defs[0].name, "review", "name falls back to the file stem");
+        assert!(
+            defs[0].findings.is_empty(),
+            "no Claude-specific findings on a non-Claude definition: {:?}",
+            defs[0].findings
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -236,12 +250,7 @@ mod tests {
             "fallback.md",
             "---\ndescription: a real sentence about what it does and when\n---\n# body\n",
         );
-        let roots = vec![Root {
-            path: dir.clone(),
-            scope: Scope::Dir,
-            runtime: Runtime::Claude,
-            exists: true,
-        }];
+        let roots = vec![root(dir.clone(), Scope::Dir, assistants::claude())];
         let (defs, _) = discover(&roots);
         assert_eq!(defs[0].name, "fallback");
         assert!(

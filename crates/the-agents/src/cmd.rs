@@ -323,7 +323,7 @@ fn agents_table(defs: &[&AgentDef]) -> Table {
     let mut t = Table::new(vec![
         Column::new("name", "NAME"),
         Column::new("scope", "SCOPE"),
-        Column::new("runtime", "RUNTIME"),
+        Column::new("assistant", "ASSISTANT"),
         Column::new("model", "MODEL"),
         Column::new("tools", "TOOLS"),
         Column::new("description", "DESCRIPTION").max_width(DESCRIPTION_WIDTH),
@@ -335,7 +335,7 @@ fn agents_table(defs: &[&AgentDef]) -> Table {
         t.push(vec![
             d.name.clone().into(),
             d.scope.as_str().into(),
-            d.runtime.as_str().into(),
+            d.assistant.id.into(),
             Cell::opt(d.model()),
             d.tools().into(),
             Cell::opt(d.description().map(str::trim)),
@@ -410,7 +410,7 @@ fn show_report(d: &AgentDef) -> Report {
         .field("name", d.name.clone())
         .field("description", Cell::opt(d.description().map(str::trim)))
         .field("scope", d.scope.as_str())
-        .field("runtime", d.runtime.as_str())
+        .field("assistant", d.assistant.id)
         .field("model", Cell::opt(d.model()))
         .field("path", d.path.clone());
     let tools = d.tools();
