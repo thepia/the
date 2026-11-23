@@ -21,8 +21,9 @@ name = "th"
 path = "src/bin/th.rs"
 
 [dependencies]
-the-output = { path = "../the-output", version = "0.3.0" }
-the-skills = { path = "../the-skills", version = "0.3.0" }
+the-output = { path = "../the-output", version = "0.4.0" }
+the-skills = { path = "../the-skills", version = "0.4.0" }
+the-agents = { path = "../the-agents", version = "0.4.0" }
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -1,0 +1,19 @@
+[package]
+name = "the-agents"
+description = "Discover and lint agent/subagent definition files (`.claude/agents/*.md` and equivalents) for the Thepia command lines"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+the-output = { path = "../the-output", version = "0.4.0" }
+# Reuses the generic lint core: the frontmatter parser (`parse::parse`), the security-smoke detection
+# (`smoke::check_smoke`), the environment probe (`locate::Env`), and the `Scope` vocabulary. The
+# agent-specific field rules live here (see `rules`), specializing the shared machinery per WORK-0036.
+the-skills = { path = "../the-skills", version = "0.4.0" }
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true

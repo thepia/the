@@ -52,4 +52,17 @@ mod tests {
         // this is the parser `dispatch` actually runs.
         the_skills::Skills.augment(root_command()).debug_assert();
     }
+
+    #[test]
+    fn agents_grammar_folds_onto_the_root() {
+        the_agents::Agents.augment(root_command()).debug_assert();
+    }
+
+    #[test]
+    fn both_command_crates_fold_together_without_collision() {
+        // Every registered target's grammar folds onto one root (the real pipeline parser), so two
+        // command crates must not collide on subcommand name or global-flag id.
+        let root = the_agents::Agents.augment(the_skills::Skills.augment(root_command()));
+        root.debug_assert();
+    }
 }
