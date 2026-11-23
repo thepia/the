@@ -38,6 +38,20 @@ argv ──> dispatch ──> Registry.get(id) ──> Target::execute ──> R
    Build the `the_output::table::Report` once with the `Human`/`Term` matching `ctx.form()`, then let
    `Report::render` emit plain, ansi, or json. Reuse `the-output` as a toolkit; do not reinvent rendering.
 
+## Accepting a relative path in the subcommand slot
+
+A command that scans a directory should accept a path given *instead of* a subcommand, so
+`the <group> ..` scans `..` rather than erroring `unrecognized subcommand '..'`. The standard pattern:
+
+- add `#[command(external_subcommand)] Path(Vec<String>)` to the subcommand enum — clap captures any
+  token that is not a known subcommand instead of rejecting it;
+- in `execute`/routing, pattern-match the captured token with the shared
+  `the_output::command::is_path_like`: a path routes to the default action (additively onto the search),
+  a non-path is reported as an `unknown-subcommand` usage error (so typos still fail clearly).
+
+Paths given *after* a subcommand (`the <group> lint ..`) are ordinary positionals on that subcommand and
+use the same `is_path_like` rule.
+
 ## Channel discipline (gated)
 
 stdout carries only the result; everything else is stderr; `--format human|json` is the one switch.

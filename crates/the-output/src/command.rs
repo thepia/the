@@ -120,6 +120,15 @@ impl Ctx {
     }
 }
 
+/// Whether a positional token is a filesystem PATH (a scan root) rather than a subcommand or a bare
+/// name: it contains `/` or `\`, starts with `~`, or is `.`/`..`. A command uses this to pattern-match
+/// a relative/absolute path given in place of (or after) a subcommand, so `<group> ..` scans a
+/// directory instead of being rejected as an unknown subcommand. Shared so every command applies the
+/// same rule. Pair it with clap's `#[command(external_subcommand)]` to capture the leading token.
+pub fn is_path_like(s: &str) -> bool {
+    s.contains('/') || s.contains('\\') || s.starts_with('~') || s == "." || s == ".."
+}
+
 /// A parsed, routable command: the target it is addressed to and the parsed arguments for it. This
 /// is the in-process form; a target that forwards execution to a daemon lowers it to the transport
 /// envelope (`thepia-proto`, newline-JSON locally / irpc over iroh) at that boundary. Kept minimal

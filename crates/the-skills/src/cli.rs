@@ -61,6 +61,12 @@ pub enum SkillsCmd {
         #[arg(long)]
         advice: bool,
     },
+    /// A relative or absolute PATH given in place of a subcommand (e.g. `the skills ..`): scan that
+    /// directory/project like the bare `skills`, additively. Captured as an external subcommand so the
+    /// parser pattern-matches a leading path instead of rejecting it as an unknown subcommand; a
+    /// non-path token here is reported as an unrecognized subcommand.
+    #[command(external_subcommand)]
+    Path(Vec<String>),
 }
 
 /// Human presentation form for `the skills list`.

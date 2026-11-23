@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 
 use clap::{Args, Command, FromArgMatches};
 use serde_json::{Value, json};
-use the_output::command::{CommandDescriptor, Ctx, Form, Invocation, Results, Target, Tier};
+use the_output::command::{
+    CommandDescriptor, Ctx, Form, Invocation, Results, Target, Tier, is_path_like,
+};
 
 use crate::analysis::corpus_findings;
 use crate::cli::{ListForm, SearchArgs, SkillsArgs, SkillsCmd};
@@ -21,13 +23,6 @@ use the_output::style::{self, Term};
 use the_output::table::{Block, Cell, Column, Human, Record, Report, Table, Tone};
 
 const DESCRIPTION_WIDTH: usize = 72;
-
-/// A positional target is a filesystem PATH (a scan root), not a skill name, when it is path-like: a
-/// skill `name` is a slug (lowercase letters, digits, single hyphens) that can never contain any of
-/// these, so the two never collide. Use `./name` to force a bare word to be read as a path.
-fn is_path_like(s: &str) -> bool {
-    s.contains('/') || s.contains('\\') || s.starts_with('~') || s == "." || s == ".."
-}
 
 /// `search` with `root` added as a `--dir` scan root. The positional path is additive, exactly like
 /// `--dir`: the agent roots (including the user's own skills) stay in the scan unless the caller
@@ -159,6 +154,24 @@ fn build_skills(args: SkillsArgs, format: Format, h: Human) -> Result<Built, Dia
             all,
             advice,
         }) => build_lint(target.as_deref(), &search, all, advice, args.beta),
+        Some(SkillsCmd::Path(tokens)) => {
+            // A path (or paths) given instead of a subcommand: scan them like the bare `skills`,
+            // additively onto the top-level search. A leading non-path token is a real typo.
+            let first = tokens.first().map(String::as_str).unwrap_or_default();
+            if !is_path_like(first) {
+                return Err(unknown_subcommand(first));
+            }
+            let mut search = args.search.clone();
+            for t in tokens.iter().filter(|t| is_path_like(t)) {
+                search.dirs.push(PathBuf::from(t));
+            }
+            let form = if args.by_scope {
+                ListForm::ByScope
+            } else {
+                ListForm::Prose
+            };
+            build_list(&search, form, format, h)
+        }
         None => {
             let form = if args.by_scope {
                 ListForm::ByScope
@@ -168,6 +181,17 @@ fn build_skills(args: SkillsArgs, format: Format, h: Human) -> Result<Built, Dia
             build_list(&args.search, form, format, h)
         }
     }
+}
+
+/// A token in the subcommand slot that is neither a known subcommand nor a path.
+fn unknown_subcommand(name: &str) -> Diagnostic {
+    Diagnostic::error(
+        "unknown-subcommand",
+        format!("unrecognized subcommand `{name}`"),
+    )
+    .cause("not a known `skills` subcommand, and not a path")
+    .help("run `the skills --help`, or pass a path like `the skills .` to scan a directory")
+    .exit(Exit::Usage)
 }
 
 /// How a subcommand's issue diagnostics are presented on stderr.
@@ -1540,6 +1564,7 @@ mod tests {
 
         let matrix: &[&[&str]] = &[
             &["the", "skills", "--scope", "dir", "--dir", d],
+            &["the", "skills", "--scope", "dir", d], // a leading path in the subcommand slot
             &["the", "skills", "list", "--scope", "dir", "--dir", d],
             &[
                 "the", "skills", "list", "--prose", "--scope", "dir", "--dir", d,
@@ -1581,6 +1606,76 @@ mod tests {
         ];
         conformance::assert_matrix(&reg, matrix);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // Parse an argv against the real skills grammar and return the "skills" submatches for execute().
+    #[cfg(test)]
+    fn skills_matches(argv: &[&str]) -> clap::ArgMatches {
+        let m = Skills
+            .augment(Command::new("the"))
+            .try_get_matches_from(argv)
+            .unwrap();
+        m.subcommand().unwrap().1.clone()
+    }
+
+    #[cfg(test)]
+    fn plain_ctx() -> Ctx {
+        let plain = the_output::command::StreamState {
+            color: false,
+            tty: false,
+        };
+        Ctx::new(Format::Human, false, plain, plain)
+    }
+
+    #[test]
+    fn a_leading_path_is_scanned_not_rejected() {
+        // Regression: `the skills <path>` with no subcommand used to error `unrecognized subcommand`.
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("the-skills-leadpath-{}", std::process::id()));
+        let skill = dir.join("myskill");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&skill).unwrap();
+        fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: myskill\ndescription: Work with structured documents end to end\n---\n# Body\n",
+        )
+        .unwrap();
+
+        // `--scope dir` (a top-level flag, parsed before the external path) keeps the scan hermetic.
+        let sub = skills_matches(&["the", "skills", "--scope", "dir", dir.to_str().unwrap()]);
+        let results = Skills
+            .execute(
+                &Invocation {
+                    target: "skills",
+                    matches: sub,
+                },
+                &plain_ctx(),
+            )
+            .unwrap();
+        let mut out = Vec::new();
+        results.render(&mut out, Form::Plain).unwrap();
+        assert!(
+            String::from_utf8(out).unwrap().contains("myskill"),
+            "a leading path scans that directory"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_non_path_in_the_subcommand_slot_is_a_usage_error() {
+        let sub = skills_matches(&["the", "skills", "bogus"]);
+        let err = Skills
+            .execute(
+                &Invocation {
+                    target: "skills",
+                    matches: sub,
+                },
+                &plain_ctx(),
+            )
+            .err()
+            .expect("a non-path subcommand is an error");
+        assert_eq!(err.code, "unknown-subcommand");
+        assert_eq!(err.exit, Exit::Usage);
     }
 
     #[test]
