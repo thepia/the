@@ -969,4 +969,41 @@ mod tests {
         );
         let _ = fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn unknown_key_is_off_by_default_and_surfaces_under_beta() {
+        let dir =
+            std::env::temp_dir().join(format!("the-agents-unknownkey-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        // A valid definition carrying an extra key (a tool's own field, or a typo). Because a closed
+        // key set is assistant/tool-specific, the unknown-key check is off by default (`--beta` only).
+        fs::write(
+            dir.join("extra.md"),
+            "---\nname: extra\ndescription: Review diffs for correctness and surface the riskiest changes\nwat: 1\n---\n# body\n",
+        )
+        .unwrap();
+        let d = dir.to_str().unwrap();
+
+        let def = run(&["the", "agents", "lint", "--scope", "dir", "--dir", d]);
+        assert!(
+            !stdout_of(def.as_ref()).contains("agent-unknown-key"),
+            "the default lint does not flag unknown keys"
+        );
+        assert!(!stderr_of(def.as_ref()).contains("unknown frontmatter key"));
+        assert_eq!(
+            def.exit_code(),
+            0,
+            "an extra key alone does not fail the lint"
+        );
+
+        let beta = run(&[
+            "the", "agents", "lint", "--beta", "--scope", "dir", "--dir", d,
+        ]);
+        assert!(
+            stderr_of(beta.as_ref()).contains("unknown frontmatter key"),
+            "--beta surfaces the unknown-key check"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

@@ -171,12 +171,16 @@ pub const RULES: &[Rule] = &[
     },
     Rule {
         code: "agent-unknown-key",
+        // A closed key set is assistant- and tool-specific: other assistants and additional tools add
+        // keys that do not disrupt the agent, so flagging "unknown" is a hardening opinion, not a
+        // default correctness check. Staged behind `--beta` (off by default) until the `--strict`
+        // hardening mode is designed; it then moves there. See crate::keys (scope note) and WORK-0036.
         label: "unknown frontmatter key",
         why: "an unrecognized key is ignored, so its intent silently has no effect",
         fix: "remove the unrecognized key, or correct a typo'd field name",
         kind: Spec,
         severity: Note,
-        stability: Default,
+        stability: Beta,
     },
     // Security (detection reused from the-skills smoke; agent-worded here).
     Rule {

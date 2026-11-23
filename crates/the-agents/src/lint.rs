@@ -12,6 +12,7 @@ use serde_json::Value;
 use the_output::diag::{Diagnostic, Exit};
 use the_skills::parse::{Parsed, name_format_ok};
 
+use crate::keys;
 use crate::rules::{self, Severity};
 
 /// A single lint finding against an agent definition: the rule `code` (its `why`/`fix`/severity come
@@ -48,23 +49,6 @@ impl Finding {
     }
 }
 
-/// Claude Code `effort:` levels (closed set; frontmatter reference, checked 2026-11-23).
-const EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
-
-/// Known agent-definition frontmatter keys (Claude Code subagent frontmatter + the Agent-tool
-/// definition convention, checked 2026-11-23). A key outside this set drives `agent-unknown-key`.
-/// Re-check when a runtime adds a field: a missing key here makes the rule fire on valid definitions.
-const KNOWN_KEYS: &[&str] = &[
-    "name",
-    "description",
-    "tools",
-    "model",
-    "effort",
-    "maxTurns",
-    "color",
-    "isolation",
-];
-
 /// A present description is too terse when it is BOTH short and sparse: a bare noun phrase the
 /// orchestrator cannot delegate on. Mirrors the-skills' terse heuristic.
 const DESCRIPTION_MIN_WORDS: usize = 3;
@@ -99,11 +83,7 @@ pub fn lint(parsed: &Parsed, raw: &str, file_stem: &str, parent: &Path) -> Vec<F
 
     check_name(parsed, file_stem, &mut out);
     check_description(parsed, &mut out);
-    check_tools(parsed, &mut out);
-    check_model(parsed, &mut out);
-    check_effort(parsed, &mut out);
-    check_max_turns(parsed, &mut out);
-    check_unknown_keys(parsed, &mut out);
+    check_fields(parsed, &mut out);
     check_security(parsed, raw, parent, &mut out);
     out
 }
@@ -167,62 +147,56 @@ fn check_description(parsed: &Parsed, out: &mut Vec<Finding>) {
     }
 }
 
-fn check_tools(parsed: &Parsed, out: &mut Vec<Finding>) {
-    match parsed.frontmatter.get("tools") {
-        None => {}
-        Some(Value::String(s)) if !s.trim().is_empty() => {}
-        Some(Value::Array(a)) if a.iter().all(Value::is_string) => {}
-        Some(_) => out.push(Finding::new(
-            "agent-tools-invalid",
-            "`tools:` is neither a non-empty string nor a list of strings",
-        )),
-    }
-}
-
-fn check_model(parsed: &Parsed, out: &mut Vec<Finding>) {
-    match parsed.frontmatter.get("model") {
-        None => {}
-        Some(Value::String(s)) if !s.trim().is_empty() => {}
-        Some(_) => out.push(Finding::new(
-            "agent-model-empty",
-            "`model:` is empty or not a string",
-        )),
-    }
-}
-
-fn check_effort(parsed: &Parsed, out: &mut Vec<Finding>) {
-    match parsed.frontmatter.get("effort") {
-        None => {}
-        Some(Value::String(s)) if EFFORT_LEVELS.contains(&s.as_str()) => {}
-        Some(v) => {
-            let shown = v.as_str().map_or_else(|| v.to_string(), ToOwned::to_owned);
-            out.push(Finding::new(
-                "agent-effort-invalid",
-                format!("`effort: {shown}` is not one of low, medium, high, xhigh, max"),
-            ));
-        }
-    }
-}
-
-fn check_max_turns(parsed: &Parsed, out: &mut Vec<Finding>) {
-    match parsed.frontmatter.get("maxTurns") {
-        None => {}
-        Some(v) if v.as_u64().is_some_and(|n| n > 0) => {}
-        Some(v) => out.push(Finding::new(
-            "agent-maxturns-invalid",
-            format!("`maxTurns: {v}` is not a positive integer"),
-        )),
-    }
-}
-
-fn check_unknown_keys(parsed: &Parsed, out: &mut Vec<Finding>) {
-    for key in parsed.frontmatter.keys() {
-        if !KNOWN_KEYS.contains(&key.as_str()) {
-            out.push(Finding::new(
+/// Validate every frontmatter key off the [key registry](crate::keys): a key with no prop is unknown
+/// (the `agent-unknown-key` rule, staged behind `--beta`); a known key with a value constraint is
+/// checked against it. `name`/`description` carry their own dedicated checks and are skipped here.
+fn check_fields(parsed: &Parsed, out: &mut Vec<Finding>) {
+    for (key, val) in &parsed.frontmatter {
+        match keys::prop(key) {
+            None => out.push(Finding::new(
                 "agent-unknown-key",
                 format!("`{key}` is not a known agent frontmatter key"),
-            ));
+            )),
+            Some(prop) => check_value(prop, key, val, out),
         }
+    }
+}
+
+/// Check one known key's value against its [`ValueCheck`](crate::keys::ValueCheck). Emits the key's
+/// `invalid_code` on failure; keys with no generic value check (name/description handled elsewhere,
+/// unconstrained, or deferred-enforcement) carry an empty code and never fire here.
+fn check_value(prop: &keys::KeyProp, key: &str, val: &Value, out: &mut Vec<Finding>) {
+    use keys::ValueCheck::{
+        AnyString, Bool, Closed, Ignored, Name, OpenString, PosInt, StringOrList, Text,
+    };
+    let (ok, message) = match prop.value {
+        // Handled by check_name / check_description, or carrying no value constraint.
+        Name | Text | AnyString | Bool | Ignored => return,
+        OpenString => (
+            matches!(val, Value::String(s) if !s.trim().is_empty()),
+            format!("`{key}:` is empty or not a string"),
+        ),
+        Closed(set) => (val.as_str().is_some_and(|s| set.contains(&s)), {
+            let shown = val
+                .as_str()
+                .map_or_else(|| val.to_string(), ToOwned::to_owned);
+            format!("`{key}: {shown}` is not one of {}", set.join(", "))
+        }),
+        PosInt => (
+            val.as_u64().is_some_and(|n| n > 0),
+            format!("`{key}: {val}` is not a positive integer"),
+        ),
+        StringOrList => (
+            match val {
+                Value::String(s) => !s.trim().is_empty(),
+                Value::Array(a) => a.iter().all(Value::is_string),
+                _ => false,
+            },
+            format!("`{key}:` is neither a non-empty string nor a list of strings"),
+        ),
+    };
+    if !ok && !prop.invalid_code.is_empty() {
+        out.push(Finding::new(prop.invalid_code, message));
     }
 }
 
