@@ -141,7 +141,7 @@ fn build_skills(args: SkillsArgs, format: Format, h: Human) -> Result<Built, Dia
         Some(SkillsCmd::List(list_args)) => {
             let form = list_args.presentation();
             let search = with_positional(&list_args.search, list_args.path);
-            build_list(&search, form, format, h)
+            build_list(&search, form, format, h, args.beta)
         }
         Some(SkillsCmd::Show { name, search }) => build_show(&name, &search),
         Some(SkillsCmd::Dirs { path, search }) => {
@@ -170,7 +170,7 @@ fn build_skills(args: SkillsArgs, format: Format, h: Human) -> Result<Built, Dia
             } else {
                 ListForm::Prose
             };
-            build_list(&search, form, format, h)
+            build_list(&search, form, format, h, args.beta)
         }
         None => {
             let form = if args.by_scope {
@@ -178,7 +178,7 @@ fn build_skills(args: SkillsArgs, format: Format, h: Human) -> Result<Built, Dia
             } else {
                 ListForm::Prose
             };
-            build_list(&args.search, form, format, h)
+            build_list(&args.search, form, format, h, args.beta)
         }
     }
 }
@@ -570,6 +570,7 @@ fn build_list(
     form: ListForm,
     format: Format,
     h: Human,
+    beta: bool,
 ) -> Result<Built, Diagnostic> {
     let (cat, notices) = catalog(search, true)?;
     let skills = selected(&cat, search);
@@ -582,7 +583,7 @@ fn build_list(
     if skills.is_empty() {
         findings.push(no_skills_note(&cat));
     }
-    let report = present_list(&skills, &cat.agents, &cat.roots, form, h);
+    let report = present_list(&skills, &cat.agents, &cat.roots, form, h, beta);
     Ok(Built {
         report,
         notices,
@@ -599,11 +600,12 @@ fn present_list(
     roots: &[RootInfo],
     form: ListForm,
     h: Human,
+    beta: bool,
 ) -> Report {
     match form {
         ListForm::Tabular => present_tabular(skills, roots),
-        ListForm::Prose => present_prose_single(skills, agents, roots, h),
-        ListForm::ByScope => present_prose_by_scope(skills, roots, h),
+        ListForm::Prose => present_prose_single(skills, agents, roots, h, beta),
+        ListForm::ByScope => present_prose_by_scope(skills, roots, h, beta),
     }
 }
 
@@ -619,18 +621,29 @@ enum IssueTone {
     Error,
 }
 
-fn skill_issue_tone(s: &Skill) -> Option<IssueTone> {
+/// A skill's lint findings that are visible at the current beta setting: beta-staged rules are hidden
+/// unless `--beta`, exactly as the lint command gates them, so the default `skills` list never surfaces
+/// an experimental rule (and its issue count and breakdown agree with what is shown).
+fn visible_lint(s: &Skill, beta: bool) -> impl Iterator<Item = &Problem> {
+    s.lint
+        .iter()
+        .filter(move |p| beta || !crate::rules::is_beta(p.code))
+}
+
+fn skill_issue_tone(s: &Skill, beta: bool) -> Option<IssueTone> {
+    let has_error_lint = visible_lint(s, beta).any(Problem::is_error);
+    let has_any_lint = visible_lint(s, beta).next().is_some();
     if s.agents
         .iter()
         .any(|v| matches!(v.status, Status::Skipped(_)))
-        || s.lint.iter().any(Problem::is_error)
+        || has_error_lint
     {
         Some(IssueTone::Error)
     } else if s
         .agents
         .iter()
         .any(|v| matches!(v.status, Status::Conflict { .. } | Status::Unknown(_)))
-        || !s.lint.is_empty()
+        || has_any_lint
     {
         Some(IssueTone::Warn)
     } else {
@@ -640,10 +653,10 @@ fn skill_issue_tone(s: &Skill) -> Option<IssueTone> {
 
 /// Render a list of skills as a comma-separated paragraph, deduplicating same-named skills within
 /// the paragraph and prefixing a warning/error colored `▲` (`style::GLYPH_ISSUE`) to skills with issues.
-fn format_skill_paragraph(skills: &[&Skill], h: Human) -> String {
+fn format_skill_paragraph(skills: &[&Skill], h: Human, beta: bool) -> String {
     let mut entries: Vec<(&str, Option<IssueTone>)> = Vec::new();
     for s in skills {
-        let tone = skill_issue_tone(s);
+        let tone = skill_issue_tone(s, beta);
         match entries
             .iter_mut()
             .find(|(name, _)| *name == s.name.as_str())
@@ -682,42 +695,58 @@ fn issue_label(code: &str) -> &'static str {
     crate::rules::label(code)
 }
 
-/// Build a concise summary of totals and issue counts across `skills` for prose output.
-fn format_issue_summary(skills: &[&Skill], h: Human) -> Option<String> {
-    const ISSUE_ORDER: &[(&str, IssueTone)] = &[
-        ("no-frontmatter", IssueTone::Error),
-        ("frontmatter-unterminated", IssueTone::Error),
-        ("frontmatter-invalid", IssueTone::Error),
-        ("name-missing", IssueTone::Error),
-        ("name-has-slash", IssueTone::Error),
-        ("description-not-string", IssueTone::Error),
-        ("symlink-escape", IssueTone::Error),
-        ("trojan-source", IssueTone::Error),
-        ("exposed-secret", IssueTone::Error),
-        ("skill-conflict", IssueTone::Warn),
-        ("broken-link", IssueTone::Warn),
-        ("link-escapes-skill", IssueTone::Warn),
-        ("broken-symlink", IssueTone::Warn),
-        ("unrestricted-bash", IssueTone::Warn),
-        ("name-format", IssueTone::Warn),
-        ("name-mismatch", IssueTone::Warn),
-        ("description-missing", IssueTone::Warn),
-        ("description-too-long", IssueTone::Warn),
-        ("compatibility-invalid", IssueTone::Warn),
-        ("license-not-string", IssueTone::Warn),
-        ("metadata-not-map", IssueTone::Warn),
-        ("allowed-tools-invalid", IssueTone::Warn),
-        ("unknown-frontmatter-key", IssueTone::Warn),
-    ];
+/// Record one skill as having an issue of `code` (deduped per skill, so a skill with the same issue
+/// twice counts once). `per` is a flat list of distinct (code, tone, skill-name) triples.
+fn note_issue<'a>(
+    per: &mut Vec<(&'a str, IssueTone, &'a str)>,
+    code: &'a str,
+    tone: IssueTone,
+    name: &'a str,
+) {
+    if !per.iter().any(|(c, _, n)| *c == code && *n == name) {
+        per.push((code, tone, name));
+    }
+}
 
+/// Build a concise summary of totals and issue counts across `skills` for prose output. The breakdown
+/// is derived from the actual findings (every lint finding plus the skipped / conflict / unknown agent
+/// verdicts), never a hardcoded subset: a hardcoded list drifts from the rule registry and silently
+/// drops newer rules, so a skill counted in "N with issues" could appear on no breakdown line. Here
+/// every affected skill is represented, labels and severity come from the registry, and a new rule
+/// shows up automatically.
+fn format_issue_summary(skills: &[&Skill], h: Human, beta: bool) -> Option<String> {
     let mut distinct_names: Vec<&str> = Vec::new();
-    let mut issue_names: Vec<&str> = Vec::new();
+    let mut per: Vec<(&str, IssueTone, &str)> = Vec::new();
     for s in skills {
         if !distinct_names.contains(&s.name.as_str()) {
             distinct_names.push(&s.name);
         }
-        if skill_issue_tone(s).is_some() && !issue_names.contains(&s.name.as_str()) {
-            issue_names.push(&s.name);
+        for p in visible_lint(s, beta) {
+            let tone = if p.is_error() {
+                IssueTone::Error
+            } else {
+                IssueTone::Warn
+            };
+            note_issue(&mut per, p.code, tone, &s.name);
+        }
+        for v in &s.agents {
+            match &v.status {
+                Status::Skipped(p) => note_issue(&mut per, p.code, IssueTone::Error, &s.name),
+                Status::Unknown(p) => note_issue(&mut per, p.code, IssueTone::Warn, &s.name),
+                Status::Conflict { .. } => {
+                    note_issue(&mut per, "skill-conflict", IssueTone::Warn, &s.name)
+                }
+                Status::Loaded | Status::Shadowed { .. } => {}
+            }
+        }
+    }
+
+    // The affected set is exactly the skills that contributed any issue, so the header and the
+    // breakdown can never disagree.
+    let mut issue_names: Vec<&str> = Vec::new();
+    for &(_, _, name) in &per {
+        if !issue_names.contains(&name) {
+            issue_names.push(name);
         }
     }
     if issue_names.is_empty() {
@@ -733,36 +762,33 @@ fn format_issue_summary(skills: &[&Skill], h: Human) -> Option<String> {
         &format!("{total} {skill_word} ({affected} with issues):"),
     ));
 
-    for &(code, tone) in ISSUE_ORDER {
-        let mut count_names: Vec<&str> = Vec::new();
-        for s in skills {
-            let has_code = match code {
-                "skill-conflict" => s
-                    .agents
-                    .iter()
-                    .any(|v| matches!(v.status, Status::Conflict { .. })),
-                _ => {
-                    s.agents.iter().any(|v| {
-                        matches!(&v.status, Status::Skipped(p) | Status::Unknown(p) if p.code == code)
-                    }) || s.lint.iter().any(|p| p.code == code)
-                }
-            };
-            if has_code && !count_names.contains(&s.name.as_str()) {
-                count_names.push(&s.name);
-            }
+    // One line per distinct code, errors before warnings then most frequent first. A skill with
+    // several kinds of issue appears on several lines (a decomposition by issue type, not a partition),
+    // so the line counts need not sum to `affected`.
+    // `per` is already deduped per (code, name), so counting rows for a code is the distinct-skill count.
+    let count_of = |code: &str| per.iter().filter(|(c, _, _)| *c == code).count();
+    let mut codes: Vec<(&str, IssueTone)> = Vec::new();
+    for &(c, t, _) in &per {
+        if !codes.iter().any(|(cc, _)| *cc == c) {
+            codes.push((c, t));
         }
-        if !count_names.is_empty() {
-            let glyph_style = match tone {
-                IssueTone::Error => style::FAIL.bold(),
-                IssueTone::Warn => style::WARN.bold(),
-            };
-            let glyph = h.term.paint(glyph_style, style::GLYPH_ISSUE);
-            lines.push(format!(
-                "  {glyph} {} {}",
-                count_names.len(),
-                issue_label(code)
-            ));
-        }
+    }
+    codes.sort_by(|a, b| {
+        b.1.cmp(&a.1)
+            .then_with(|| count_of(b.0).cmp(&count_of(a.0)))
+            .then_with(|| a.0.cmp(b.0))
+    });
+    for (code, tone) in codes {
+        let glyph_style = match tone {
+            IssueTone::Error => style::FAIL.bold(),
+            IssueTone::Warn => style::WARN.bold(),
+        };
+        let glyph = h.term.paint(glyph_style, style::GLYPH_ISSUE);
+        lines.push(format!(
+            "  {glyph} {} {}",
+            count_of(code),
+            issue_label(code)
+        ));
     }
 
     Some(lines.join("\n"))
@@ -781,6 +807,7 @@ fn present_prose_single(
     agents: &[Agent],
     roots: &[RootInfo],
     h: Human,
+    beta: bool,
 ) -> Report {
     let mut report = Report::new();
     if let Some(assistants) = format_assistants_paragraph(agents, h) {
@@ -788,10 +815,10 @@ fn present_prose_single(
     }
     if !skills.is_empty() {
         let heading = h.term.paint(style::brand(), "[all skills]");
-        let paragraph = format!("{heading}\n{}", format_skill_paragraph(skills, h));
+        let paragraph = format!("{heading}\n{}", format_skill_paragraph(skills, h, beta));
         report = report.human_only("prose", Block::Text(paragraph));
     }
-    if let Some(summary) = format_issue_summary(skills, h) {
+    if let Some(summary) = format_issue_summary(skills, h, beta) {
         report = report.human_only("issues", Block::Text(summary));
     }
     report
@@ -799,7 +826,7 @@ fn present_prose_single(
         .json_only("searched", Block::Table(roots_table(roots)))
 }
 
-fn present_prose_by_scope(skills: &[&Skill], roots: &[RootInfo], h: Human) -> Report {
+fn present_prose_by_scope(skills: &[&Skill], roots: &[RootInfo], h: Human, beta: bool) -> Report {
     let mut report = Report::new();
     for scope in [Scope::Project, Scope::User, Scope::System, Scope::Dir] {
         let group: Vec<&Skill> = skills
@@ -811,11 +838,11 @@ fn present_prose_by_scope(skills: &[&Skill], roots: &[RootInfo], h: Human) -> Re
             let heading = h
                 .term
                 .paint(style::brand(), &format!("{}:", scope.as_str()));
-            let paragraph = format!("{heading}\n{}", format_skill_paragraph(&group, h));
+            let paragraph = format!("{heading}\n{}", format_skill_paragraph(&group, h, beta));
             report = report.human_only(scope.as_str(), Block::Text(paragraph));
         }
     }
-    if let Some(summary) = format_issue_summary(skills, h) {
+    if let Some(summary) = format_issue_summary(skills, h, beta) {
         report = report.human_only("issues", Block::Text(summary));
     }
     report
@@ -1657,6 +1684,51 @@ mod tests {
         assert!(
             String::from_utf8(out).unwrap().contains("myskill"),
             "a leading path scans that directory"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn issue_breakdown_counts_newer_rules_not_a_stale_list() {
+        // Regression: the prose issue breakdown used a hardcoded code list that drifted from the rule
+        // registry, so a skill whose only issue was a newer default rule (e.g. description-too-terse)
+        // was counted in "N with issues" but shown on no breakdown line. It must now appear.
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("the-skills-breakdown-{}", std::process::id()));
+        let skill = dir.join("terse");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&skill).unwrap();
+        // A valid, loadable skill whose ONLY issue is a terse description (a default rule absent from
+        // the old hardcoded breakdown list).
+        fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: terse\ndescription: PDF tools\n---\n# Body\n",
+        )
+        .unwrap();
+
+        // Bare `the skills <path>` -> prose list, which renders the issue summary.
+        let sub = skills_matches(&["the", "skills", "--scope", "dir", dir.to_str().unwrap()]);
+        let results = Skills
+            .execute(
+                &Invocation {
+                    target: "skills",
+                    matches: sub,
+                },
+                &plain_ctx(),
+            )
+            .unwrap();
+        let mut out = Vec::new();
+        results.render(&mut out, Form::Plain).unwrap();
+        let out = String::from_utf8(out).unwrap();
+
+        assert!(
+            out.contains("(1 with issues)"),
+            "one affected skill:\n{out}"
+        );
+        let label = crate::rules::label("description-too-terse");
+        assert!(
+            out.contains(label),
+            "the breakdown must list the newer rule `{label}`, got:\n{out}"
         );
         let _ = fs::remove_dir_all(&dir);
     }
