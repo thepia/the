@@ -341,6 +341,133 @@ where
     }
 }
 
+/// Test-support for command crates: drive a command through the full render-form matrix and assert
+/// the cross-form invariants, so one short argv list yields wide-combination coverage. This is the
+/// standard way a command crate proves it is flexible across `--format` and color. Not used in
+/// production (pure test helpers; covered by the command crates' tests).
+pub mod conformance {
+    use super::*;
+    use clap::{Arg, ArgAction, value_parser};
+
+    /// One captured run of the pipeline against injected plain buffers.
+    #[derive(Debug)]
+    pub struct Captured {
+        pub out: String,
+        pub err: String,
+        pub code: u8,
+    }
+
+    /// A root carrying the global `--format` / `--no-header`, as the binary builds it, so a command
+    /// crate can run the matrix without depending on the binary.
+    pub fn root() -> Command {
+        Command::new("the")
+            .subcommand_required(true)
+            .arg_required_else_help(true)
+            .arg(
+                Arg::new("format")
+                    .long("format")
+                    .global(true)
+                    .value_parser(value_parser!(Format))
+                    .default_value("human"),
+            )
+            .arg(
+                Arg::new("no-header")
+                    .long("no-header")
+                    .global(true)
+                    .action(ArgAction::SetTrue),
+            )
+    }
+
+    /// Run one `argv` through the pipeline with the given stdout color; stderr is plain.
+    pub fn run(reg: &Registry, argv: &[&str], color: bool) -> Captured {
+        let out_state = StreamState { color, tty: false };
+        let err_state = StreamState {
+            color: false,
+            tty: false,
+        };
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let code = dispatch(
+            reg,
+            root(),
+            argv.iter().copied(),
+            out_state,
+            err_state,
+            &mut out,
+            &mut err,
+        );
+        Captured {
+            out: String::from_utf8_lossy(&out).into_owned(),
+            err: String::from_utf8_lossy(&err).into_owned(),
+            code,
+        }
+    }
+
+    /// Strip CSI/SGR escape sequences so colored output can be compared to plain.
+    fn strip_ansi(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\u{1b}' {
+                for n in chars.by_ref() {
+                    if n.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    /// Run `argv` as plain, ansi, and json and assert the cross-form invariants every command must
+    /// hold, returning the plain capture for any command-specific extra checks:
+    /// - plain stdout carries no ANSI escapes (color is opt-in, never leaked);
+    /// - ansi stdout stripped of color equals plain stdout (color is the only difference);
+    /// - json stdout, when non-empty, parses as JSON (the machine form is always valid);
+    /// - the exit code is identical across all three forms (the form never changes the outcome).
+    pub fn assert_forms(reg: &Registry, argv: &[&str]) -> Captured {
+        assert!(!argv.is_empty(), "argv needs at least the program name");
+        let plain = run(reg, argv, false);
+        let ansi = run(reg, argv, true);
+        let mut jargv = vec![argv[0], "--format", "json"];
+        jargv.extend_from_slice(&argv[1..]);
+        let json = run(reg, &jargv, false);
+
+        assert!(
+            !plain.out.contains('\u{1b}'),
+            "plain stdout must carry no ANSI escapes for {argv:?}:\n{}",
+            plain.out
+        );
+        assert_eq!(
+            strip_ansi(&ansi.out),
+            plain.out,
+            "ansi and plain stdout must differ only by color for {argv:?}"
+        );
+        if !json.out.trim().is_empty() {
+            serde_json::from_str::<serde_json::Value>(&json.out).unwrap_or_else(|e| {
+                panic!("json stdout must parse for {argv:?}: {e}\n{}", json.out)
+            });
+        }
+        assert_eq!(
+            plain.code, ansi.code,
+            "exit code must not change with color for {argv:?}"
+        );
+        assert_eq!(
+            plain.code, json.code,
+            "exit code must not change with --format for {argv:?}"
+        );
+        plain
+    }
+
+    /// Assert the invariants across a whole matrix of argv lines (subcommands x flags x ...).
+    pub fn assert_matrix(reg: &Registry, argvs: &[&[&str]]) {
+        for argv in argvs {
+            assert_forms(reg, argv);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

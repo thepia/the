@@ -1510,6 +1510,79 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    // The standard command-coverage test: one argv matrix (subcommands x flags), each line asserted
+    // stable across the plain/ansi/json forms by the shared conformance harness. This is how a command
+    // crate proves flexibility cheaply; add a line here when a new subcommand or flag lands.
+    #[test]
+    fn skills_matrix_is_form_stable() {
+        use std::fs;
+        use the_output::command::{Registry, conformance};
+
+        let dir = std::env::temp_dir().join(format!("the-skills-matrix-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        for (name, desc) in [
+            (
+                "alpha-skill",
+                "Work with alpha structured documents end to end",
+            ),
+            ("beta", "PDF tools"),
+        ] {
+            let s = dir.join(name);
+            fs::create_dir_all(&s).unwrap();
+            fs::write(
+                s.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: {desc}\n---\n# Body\n"),
+            )
+            .unwrap();
+        }
+        let d = dir.to_str().unwrap();
+        let reg = Registry::new().register(Box::new(Skills));
+
+        let matrix: &[&[&str]] = &[
+            &["the", "skills", "--scope", "dir", "--dir", d],
+            &["the", "skills", "list", "--scope", "dir", "--dir", d],
+            &[
+                "the", "skills", "list", "--prose", "--scope", "dir", "--dir", d,
+            ],
+            &[
+                "the",
+                "skills",
+                "list",
+                "--by-scope",
+                "--scope",
+                "dir",
+                "--dir",
+                d,
+            ],
+            &[
+                "the",
+                "skills",
+                "list",
+                "--no-header",
+                "--scope",
+                "dir",
+                "--dir",
+                d,
+            ],
+            &["the", "skills", "dirs", "--scope", "dir", "--dir", d],
+            &["the", "skills", "lint", "--scope", "dir", "--dir", d],
+            &[
+                "the", "skills", "lint", "--all", "--scope", "dir", "--dir", d,
+            ],
+            &[
+                "the", "skills", "lint", "--advice", "--scope", "dir", "--dir", d,
+            ],
+            &[
+                "the", "skills", "lint", "--beta", "--scope", "dir", "--dir", d,
+            ],
+            &[
+                "the", "skills", "show", "beta", "--scope", "dir", "--dir", d,
+            ],
+        ];
+        conformance::assert_matrix(&reg, matrix);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn is_path_like_distinguishes_paths_from_skill_names() {
         assert!(is_path_like("."));
