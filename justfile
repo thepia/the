@@ -65,6 +65,10 @@ links:
 command-channels:
     ./scripts/check-command-channels.sh
 
+# Bump the workspace version (and internal path-dep pins) in lockstep: `just bump patch|minor|major`.
+bump level:
+    ./scripts/bump-version.sh {{level}}
+
 # Everything CI checks on Rust: fmt-check + clippy + command-channels + full tests.
 gate: fmt-check clippy command-channels test
 
