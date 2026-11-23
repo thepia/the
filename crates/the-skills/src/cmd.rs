@@ -137,6 +137,21 @@ impl Target for Skills {
 
 /// Route a parsed `skills` invocation to its subcommand builder.
 fn build_skills(args: SkillsArgs, format: Format, h: Human) -> Result<Built, Diagnostic> {
+    // A leading path given in place of a subcommand (`the skills ..`) scans it like the bare `skills`,
+    // additively. A non-path token here is a typo'd subcommand, not a directory.
+    if let Some(path) = &args.path {
+        let token = path.to_string_lossy();
+        if !is_path_like(&token) {
+            return Err(unknown_subcommand(&token));
+        }
+        let search = with_root(&args.search, path.clone());
+        let form = if args.by_scope {
+            ListForm::ByScope
+        } else {
+            ListForm::Prose
+        };
+        return build_list(&search, form, format, h, args.beta);
+    }
     match args.command {
         Some(SkillsCmd::List(list_args)) => {
             let form = list_args.presentation();
@@ -153,24 +168,6 @@ fn build_skills(args: SkillsArgs, format: Format, h: Human) -> Result<Built, Dia
             all,
             advice,
         }) => build_lint(target.as_deref(), &args.search, all, advice, args.beta),
-        Some(SkillsCmd::Path(tokens)) => {
-            // A path (or paths) given instead of a subcommand: scan them like the bare `skills`,
-            // additively onto the top-level search. A leading non-path token is a real typo.
-            let first = tokens.first().map(String::as_str).unwrap_or_default();
-            if !is_path_like(first) {
-                return Err(unknown_subcommand(first));
-            }
-            let mut search = args.search.clone();
-            for t in tokens.iter().filter(|t| is_path_like(t)) {
-                search.dirs.push(PathBuf::from(t));
-            }
-            let form = if args.by_scope {
-                ListForm::ByScope
-            } else {
-                ListForm::Prose
-            };
-            build_list(&search, form, format, h, args.beta)
-        }
         None => {
             let form = if args.by_scope {
                 ListForm::ByScope
@@ -1728,6 +1725,53 @@ mod tests {
         assert!(
             out.contains(label),
             "the breakdown must list the newer rule `{label}`, got:\n{out}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // Systematic flag-placement coverage: a flag placed before vs after the subcommand (or a leading
+    // path) must produce identical output. The fixture carries a beta-only finding (an orphan file) so
+    // that a swallowed `--beta` would change the output and fail the comparison.
+    #[test]
+    fn flags_are_placement_independent() {
+        use std::fs;
+        use the_output::command::{Registry, conformance};
+
+        let dir = std::env::temp_dir().join(format!("the-skills-placement-{}", std::process::id()));
+        let skill = dir.join("orphaned");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&skill).unwrap();
+        fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: orphaned\ndescription: Work with structured documents end to end\n---\n# Body\n",
+        )
+        .unwrap();
+        // A file referenced by nothing -> the beta `orphan-unreferenced-file` rule fires under --beta.
+        fs::write(skill.join("notes.md"), "stray\n").unwrap();
+        let d = dir.to_str().unwrap();
+        let reg = Registry::new().register(Box::new(Skills));
+
+        // --beta before vs after a leading path.
+        conformance::assert_equivalent(
+            &reg,
+            &["the", "skills", "--scope", "dir", "--beta", d],
+            &["the", "skills", "--scope", "dir", d, "--beta"],
+        );
+        // --beta before vs after the `lint` subcommand.
+        conformance::assert_equivalent(
+            &reg,
+            &[
+                "the", "skills", "lint", "--beta", "--scope", "dir", "--dir", d,
+            ],
+            &[
+                "the", "skills", "--beta", "lint", "--scope", "dir", "--dir", d,
+            ],
+        );
+        // the scan flags before vs after the subcommand.
+        conformance::assert_equivalent(
+            &reg,
+            &["the", "skills", "lint", "--scope", "dir", "--dir", d],
+            &["the", "skills", "--dir", d, "--scope", "dir", "lint"],
         );
         let _ = fs::remove_dir_all(&dir);
     }

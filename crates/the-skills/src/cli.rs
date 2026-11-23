@@ -8,10 +8,17 @@ use clap::{Args, Subcommand, ValueEnum};
 
 use crate::{Agent, Scope};
 
+// A leading PATH positional stands in for a subcommand (`the skills ..`) while flags are still parsed
+// in any position (unlike an external subcommand, which swallows every trailing token).
 #[derive(Debug, Args)]
 pub struct SkillsArgs {
     #[command(flatten)]
     pub search: SearchArgs,
+
+    /// A relative or absolute PATH given in place of a subcommand (e.g. `the skills ..`): scan that
+    /// directory/project like the bare `skills`, additively. A non-path token here is reported as an
+    /// unrecognized subcommand.
+    pub path: Option<PathBuf>,
 
     /// Group prose into multiple paragraphs with a heading for each scope/level where skills live.
     #[arg(long)]
@@ -55,12 +62,6 @@ pub enum SkillsCmd {
         #[arg(long)]
         advice: bool,
     },
-    /// A relative or absolute PATH given in place of a subcommand (e.g. `the skills ..`): scan that
-    /// directory/project like the bare `skills`, additively. Captured as an external subcommand so the
-    /// parser pattern-matches a leading path instead of rejecting it as an unknown subcommand; a
-    /// non-path token here is reported as an unrecognized subcommand.
-    #[command(external_subcommand)]
-    Path(Vec<String>),
 }
 
 /// Human presentation form for `the skills list`.

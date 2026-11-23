@@ -475,6 +475,22 @@ pub mod conformance {
             assert_forms(reg, argv);
         }
     }
+
+    /// Assert two argv lines that should be equivalent (e.g. a flag before vs after the subcommand or
+    /// a leading path) produce the same stdout and exit code. Catches flag-placement regressions
+    /// without hand-checking each ordering. Runs plain so color is out of the comparison.
+    pub fn assert_equivalent(reg: &Registry, a: &[&str], b: &[&str]) {
+        let ra = run(reg, a, false);
+        let rb = run(reg, b, false);
+        assert_eq!(
+            ra.out, rb.out,
+            "stdout differs between equivalent argv\n  a: {a:?}\n  b: {b:?}"
+        );
+        assert_eq!(
+            ra.code, rb.code,
+            "exit differs between equivalent argv\n  a: {a:?}\n  b: {b:?}"
+        );
+    }
 }
 
 #[cfg(test)]
