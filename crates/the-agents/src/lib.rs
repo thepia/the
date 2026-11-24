@@ -28,6 +28,7 @@ pub mod assistants;
 pub mod cli;
 pub mod cmd;
 pub mod discover;
+pub mod instructions;
 pub mod keys;
 pub mod lint;
 pub mod rules;

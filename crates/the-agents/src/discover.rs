@@ -104,7 +104,13 @@ pub fn discover(roots: &[Root]) -> (Vec<AgentDef>, Vec<ReadError>) {
         let mut files: Vec<PathBuf> = entries
             .filter_map(Result::ok)
             .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|x| x == "md") && p.is_file())
+            .filter(|p| {
+                p.extension().is_some_and(|x| x == "md")
+                    && p.is_file()
+                    // Instruction files (CLAUDE.md / AGENTS.md) are not agent definitions; the
+                    // instruction pass of `the agents lint` handles them.
+                    && !crate::instructions::is_instruction_file(p)
+            })
             .collect();
         files.sort();
         for path in files {

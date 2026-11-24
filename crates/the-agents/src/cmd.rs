@@ -18,7 +18,8 @@ use the_output::table::{Block, Cell, Column, Human, Record, Report, Table, Tone}
 use crate::cli::{AgentsArgs, AgentsCmd, SearchArgs};
 use crate::discover::{self, Root};
 use crate::lint::{self, Finding};
-use crate::{AgentDef, Scope};
+use crate::rules::Severity;
+use crate::{AgentDef, Scope, instructions};
 
 use the_skills::locate::Env;
 
@@ -500,6 +501,71 @@ fn rules_table() -> Table {
     t
 }
 
+/// Discover and lint the instruction files (`CLAUDE.md` / `CLAUDE.local.md` / `AGENTS.md`) across the
+/// project chain, user scope, and any `--dir`, honoring `--scope`. Part of `the agents lint` (there is
+/// one lint command per group): a full-scope lint covers both agent definitions and instruction files.
+fn gather_instruction_files(search: &SearchArgs) -> Vec<instructions::InstructionFile> {
+    let Ok(env) = Env::from_process() else {
+        return Vec::new();
+    };
+    let mut files = instructions::discover(&env, &search.dirs, search.no_user);
+    if let Some(scope) = search.scope {
+        files.retain(|f| f.scope == scope);
+    }
+    files
+}
+
+fn instructions_table(files: &[instructions::InstructionFile]) -> Table {
+    let mut t = Table::new(vec![
+        Column::new("file", "FILE"),
+        Column::new("scope", "SCOPE"),
+        Column::new("status", "STATUS"),
+        Column::new("issues", "ISSUES"),
+        Column::json_only("path"),
+        Column::json_only("kind"),
+        Column::json_only("findings"),
+    ]);
+    for f in files {
+        let has_error = f.findings.iter().any(|x| {
+            matches!(
+                instructions::rule(x.code).map(|r| r.severity),
+                Some(Severity::Error)
+            )
+        });
+        let has_warning = f.findings.iter().any(|x| {
+            matches!(
+                instructions::rule(x.code).map(|r| r.severity),
+                Some(Severity::Warn)
+            )
+        });
+        let status = if has_error {
+            Cell::toned(Tone::Fail, "error")
+        } else if has_warning {
+            Cell::toned(Tone::Warn, "warning")
+        } else if !f.findings.is_empty() {
+            Cell::toned(Tone::Dim, "note")
+        } else {
+            Cell::toned(Tone::Ok, "ok")
+        };
+        let mut codes: Vec<String> = Vec::new();
+        for x in &f.findings {
+            if !codes.iter().any(|c| c == x.code) {
+                codes.push(x.code.to_owned());
+            }
+        }
+        t.push(vec![
+            f.kind.as_str().into(),
+            f.scope.as_str().into(),
+            status,
+            codes.into(),
+            f.path.clone().into(),
+            f.kind.as_str().into(),
+            Cell::Json(json!(f.findings)),
+        ]);
+    }
+    t
+}
+
 fn build_lint(
     target: Option<&str>,
     search: &SearchArgs,
@@ -544,9 +610,26 @@ fn build_lint(
         .flat_map(|d| d.context.iter().cloned())
         .collect();
     findings.extend(skillref);
-    let report = Report::new()
-        .table("agents", lint_table(&defs, beta, &skillref_paths))
-        .json_only("diagnostics", Block::Table(diagnostics_table(&findings)));
+
+    // One lint command per group: a full-scope `the agents lint` also lints the instruction files
+    // (CLAUDE.md / AGENTS.md) in the same scopes. When narrowed to a single named agent, it does not
+    // (the instruction files are not that agent's), keeping a named lint focused.
+    let instr_files = if name.is_none() {
+        gather_instruction_files(search)
+    } else {
+        Vec::new()
+    };
+    for file in &instr_files {
+        for f in &file.findings {
+            findings.push(instructions::diagnostic(f, file));
+        }
+    }
+
+    let mut report = Report::new().table("agents", lint_table(&defs, beta, &skillref_paths));
+    if !instr_files.is_empty() {
+        report = report.table("instructions", instructions_table(&instr_files));
+    }
+    report = report.json_only("diagnostics", Block::Table(diagnostics_table(&findings)));
 
     let exit = if findings
         .iter()
@@ -1163,6 +1246,73 @@ mod tests {
         assert!(
             stdout_of(r.as_ref()).contains("agent-skill-not-found"),
             "the lint table surfaces the skills-reference issue, not just the summary"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lint_also_covers_instruction_files_in_the_same_scope() {
+        // One `the agents lint` covers both agent definitions and the instruction files (CLAUDE.md /
+        // AGENTS.md) in scope: a single lint command per group, not a separate one.
+        let dir =
+            std::env::temp_dir().join(format!("the-agents-instr-lint-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("docs")).unwrap();
+        fs::write(dir.join("docs/guide.md"), "hi").unwrap();
+        fs::write(
+            dir.join("reviewer.md"),
+            "---\nname: reviewer\ndescription: Review changed Rust files for correctness and risk\n---\n# body\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("CLAUDE.md"),
+            "# Project\n\nSee @docs/guide.md and @docs/missing.md.\n",
+        )
+        .unwrap();
+        let d = dir.to_str().unwrap();
+
+        let r = run(&["the", "agents", "lint", "--scope", "dir", "--dir", d]);
+        let out = stdout_of(r.as_ref());
+        assert!(
+            out.contains("reviewer"),
+            "the agent definition is listed:\n{out}"
+        );
+        assert!(
+            out.contains("CLAUDE.md") && out.contains("instruction-broken-import"),
+            "the one lint command also surfaces the instruction file finding:\n{out}"
+        );
+        assert!(
+            !out.contains("agent-no-frontmatter"),
+            "CLAUDE.md is an instruction file, not an empty agent definition:\n{out}"
+        );
+        assert!(
+            stderr_of(r.as_ref()).contains("docs/missing.md"),
+            "the broken import is reported"
+        );
+        assert_eq!(r.exit_code(), Exit::Generic as u8);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lint_of_a_named_agent_does_not_pull_in_instruction_files() {
+        let dir =
+            std::env::temp_dir().join(format!("the-agents-instr-named-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("reviewer.md"),
+            "---\nname: reviewer\ndescription: Review changed Rust files for correctness and risk\n---\n# body\n",
+        )
+        .unwrap();
+        fs::write(dir.join("CLAUDE.md"), "See @docs/missing.md.\n").unwrap();
+        let d = dir.to_str().unwrap();
+
+        let r = run(&[
+            "the", "agents", "lint", "reviewer", "--scope", "dir", "--dir", d,
+        ]);
+        assert!(
+            !stdout_of(r.as_ref()).contains("instruction-broken-import"),
+            "a named-agent lint does not lint instruction files"
         );
         let _ = fs::remove_dir_all(&dir);
     }

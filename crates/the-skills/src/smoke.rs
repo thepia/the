@@ -55,11 +55,20 @@ const PLACEHOLDER_MARKERS: &[&str] = &[
 
 /// Run all deterministic security and safety smoke checks on a skill.
 pub fn check_smoke(raw_text: &str, p: &Parsed, skill_dir: &Path) -> Vec<Problem> {
-    let mut out = Vec::new();
+    let mut out = check_text_smoke(raw_text);
     check_symlinks(skill_dir, &mut out);
+    check_unrestricted_bash(p, &mut out);
+    out
+}
+
+/// The **text-only** security smoke (hidden control/bidi characters and credential literals), without
+/// the directory walk (`check_symlinks`) or the frontmatter `allowed-tools` check. Reusable on a file
+/// that is not a skill directory, e.g. an instruction file (CLAUDE.md / AGENTS.md) at a project root,
+/// where walking the whole tree would be wrong.
+pub fn check_text_smoke(raw_text: &str) -> Vec<Problem> {
+    let mut out = Vec::new();
     check_trojan_source(raw_text, &mut out);
     check_exposed_secrets(raw_text, &mut out);
-    check_unrestricted_bash(p, &mut out);
     out
 }
 
