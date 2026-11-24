@@ -196,6 +196,18 @@ pub const RULES: &[Rule] = &[
         severity: Note,
         stability: Beta,
     },
+    Rule {
+        code: "agent-skill-not-found",
+        // Reference integrity across the agents+skills config codebase: the agent's `skills:` entries
+        // are resolved against the real skill catalog (the-skills). `the` is uniquely placed to do this
+        // cross-assistant because it owns both sides (the agents and the skill catalog).
+        label: "referenced skill not found",
+        why: "the agent names a skill in `skills:` that resolves to no available skill, so it cannot load it",
+        fix: "install the named skill, or correct the name in `skills:` to one `the skills list` shows",
+        kind: Spec,
+        severity: Warn,
+        stability: Default,
+    },
     // Security (detection reused from the-skills smoke; agent-worded here).
     Rule {
         code: "trojan-source",

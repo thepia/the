@@ -472,9 +472,19 @@ fn build_lint(
         notices.push(no_agents_note());
     }
 
-    let findings = collect_diagnostics(&defs, beta);
+    let mut findings = collect_diagnostics(&defs, beta);
+    // Cross-cutting reference check: resolve each agent's `skills:` against the real skill catalog.
+    // Needs the catalog (not available per-definition at discovery), so it runs here, like the-skills'
+    // corpus findings. Only built when some definition actually declares skills (no scan otherwise).
+    let skillref = skills_reference_diagnostics(&defs, search);
+    // The definition paths carrying a skills-reference warning, so the table STATUS reflects it.
+    let skillref_paths: std::collections::HashSet<String> = skillref
+        .iter()
+        .flat_map(|d| d.context.iter().cloned())
+        .collect();
+    findings.extend(skillref);
     let report = Report::new()
-        .table("agents", lint_table(&defs, beta))
+        .table("agents", lint_table(&defs, beta, &skillref_paths))
         .json_only("diagnostics", Block::Table(diagnostics_table(&findings)));
 
     let exit = if findings
@@ -494,7 +504,69 @@ fn build_lint(
     })
 }
 
-fn lint_table(defs: &[&AgentDef], beta: bool) -> Table {
+/// Resolve each Claude agent's `skills:` entries against the real skill catalog, emitting
+/// `agent-skill-not-found` for any that do not exist. `skills:` is a Claude subagent field, so this is
+/// scoped to Claude definitions. The skill catalog is built only when some definition declares skills
+/// (no scan otherwise), so the common case stays cheap.
+fn skills_reference_diagnostics(defs: &[&AgentDef], search: &SearchArgs) -> Vec<Diagnostic> {
+    let any_declares = defs
+        .iter()
+        .any(|d| d.assistant.id == "claude" && !d.skills().is_empty());
+    if !any_declares {
+        return Vec::new();
+    }
+    let known = known_skill_names(search);
+    let mut out = Vec::new();
+    for def in defs {
+        if def.assistant.id != "claude" {
+            continue;
+        }
+        for skill in def.skills() {
+            if !known.contains(&skill) {
+                out.push(lint::diagnostic(
+                    &Finding {
+                        code: "agent-skill-not-found",
+                        message: format!(
+                            "references skill `{skill}`, not found in the skill catalog"
+                        ),
+                        line: None,
+                        col: None,
+                    },
+                    &def.name,
+                    &def.path,
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// The set of available skill names, discovered via the-skills over the same scopes as the agent scan
+/// (project + user unless `--no-user`, plus `--dir`). Empty if the environment is unavailable.
+fn known_skill_names(search: &SearchArgs) -> std::collections::HashSet<String> {
+    let Ok(env) = Env::from_process() else {
+        return std::collections::HashSet::new();
+    };
+    let mut roots = the_skills::locate::plan(&env, &search.dirs);
+    if search.no_user {
+        roots.retain(|r| r.scope != the_skills::Scope::User);
+    }
+    the_skills::resolve::build(&roots)
+        .skills
+        .into_iter()
+        .map(|s| s.name)
+        .collect()
+}
+
+/// Build the lint result table. `skillref_paths` is the set of definition paths that carry a
+/// command-level `agent-skill-not-found` warning (computed from the skill catalog, not in the
+/// per-definition findings), so the per-row STATUS/ISSUES reflect it and never read `ok` while the
+/// summary reports a warning.
+fn lint_table(
+    defs: &[&AgentDef],
+    beta: bool,
+    skillref_paths: &std::collections::HashSet<String>,
+) -> Table {
     let mut t = Table::new(vec![
         Column::new("name", "NAME"),
         Column::new("scope", "SCOPE"),
@@ -505,13 +577,15 @@ fn lint_table(defs: &[&AgentDef], beta: bool) -> Table {
     ]);
     for d in defs {
         let shown: Vec<&Finding> = visible(d, beta).collect();
+        let has_skillref = skillref_paths.contains(&d.path.display().to_string());
         let has_error = shown.iter().any(|f| f.is_error());
-        let has_warning = shown.iter().any(|f| {
-            matches!(
-                crate::rules::rule(f.code).map(|r| r.severity),
-                Some(crate::rules::Severity::Warn)
-            )
-        });
+        let has_warning = has_skillref
+            || shown.iter().any(|f| {
+                matches!(
+                    crate::rules::rule(f.code).map(|r| r.severity),
+                    Some(crate::rules::Severity::Warn)
+                )
+            });
         let status = if has_error {
             Cell::toned(Tone::Fail, "error")
         } else if has_warning {
@@ -527,6 +601,9 @@ fn lint_table(defs: &[&AgentDef], beta: bool) -> Table {
                 if !v.iter().any(|c| c == f.code) {
                     v.push(f.code.to_owned());
                 }
+            }
+            if has_skillref {
+                v.push("agent-skill-not-found".to_owned());
             }
             v
         };
@@ -966,6 +1043,64 @@ mod tests {
         assert!(
             !out.contains("reviewer"),
             "a name filter narrows the table:\n{out}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn skills_reference_resolves_against_the_skill_catalog() {
+        // An agent's `skills:` is resolved against the real skill catalog: a present skill is fine, a
+        // missing one fires agent-skill-not-found. Hermetic: a `--dir` holding one skill + two agents.
+        let dir = std::env::temp_dir().join(format!("the-agents-skillref-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        // A real skill `present-skill` discoverable under the --dir.
+        let skill = dir.join("present-skill");
+        fs::create_dir_all(&skill).unwrap();
+        fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: present-skill\ndescription: Work with structured documents end to end\n---\n# body\n",
+        )
+        .unwrap();
+        // One agent references the present skill (ok), one references a missing skill (fires).
+        fs::write(
+            dir.join("good.md"),
+            "---\nname: good\ndescription: Reviews code with a real skill reference\nskills: present-skill\n---\n# body\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("bad.md"),
+            "---\nname: bad\ndescription: Reviews code with a dangling skill reference\nskills: no-such-skill\n---\n# body\n",
+        )
+        .unwrap();
+        let d = dir.to_str().unwrap();
+
+        let r = run(&["the", "agents", "lint", "--scope", "dir", "--dir", d]);
+        let diags = r.diagnostics();
+        let missing: Vec<_> = diags
+            .iter()
+            .filter(|x| x.code == "agent-skill-not-found")
+            .collect();
+        assert_eq!(
+            missing.len(),
+            1,
+            "exactly one dangling skill reference: {diags:?}"
+        );
+        assert!(
+            missing[0].title.contains("bad"),
+            "the finding names the referencing agent"
+        );
+        assert!(
+            missing[0]
+                .cause
+                .as_deref()
+                .unwrap_or("")
+                .contains("no-such-skill"),
+            "the finding names the missing skill"
+        );
+        // The table STATUS reflects the command-level finding, not a false `ok`.
+        assert!(
+            stdout_of(r.as_ref()).contains("agent-skill-not-found"),
+            "the lint table surfaces the skills-reference issue, not just the summary"
         );
         let _ = fs::remove_dir_all(&dir);
     }

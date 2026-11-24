@@ -75,20 +75,32 @@ impl AgentDef {
     /// The declared tools as a flat list: a comma/space-delimited string (`Read, Grep`) or a YAML list
     /// both flatten to the same vector. Empty when the field is absent (the runtime grants all tools).
     pub fn tools(&self) -> Vec<String> {
-        match self.parsed.frontmatter.get("tools") {
-            Some(serde_json::Value::String(s)) => s
-                .split([',', ' '])
-                .map(str::trim)
-                .filter(|t| !t.is_empty())
-                .map(ToOwned::to_owned)
-                .collect(),
-            Some(serde_json::Value::Array(a)) => a
-                .iter()
-                .filter_map(|v| v.as_str())
-                .map(ToOwned::to_owned)
-                .collect(),
-            _ => Vec::new(),
-        }
+        string_or_list(self.parsed.frontmatter.get("tools"))
+    }
+
+    /// The skills the agent declares in `skills:` as a flat list (string-or-list, same shape as
+    /// [`tools`](Self::tools)). Empty when the field is absent. Resolved against the real skill
+    /// catalog by the `agent-skill-not-found` reference check.
+    pub fn skills(&self) -> Vec<String> {
+        string_or_list(self.parsed.frontmatter.get("skills"))
+    }
+}
+
+/// Flatten a string-or-list frontmatter value (`"a, b"` or `[a, b]`) to a vector, dropping blanks.
+fn string_or_list(value: Option<&serde_json::Value>) -> Vec<String> {
+    match value {
+        Some(serde_json::Value::String(s)) => s
+            .split([',', ' '])
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(ToOwned::to_owned)
+            .collect(),
+        Some(serde_json::Value::Array(a)) => a
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(ToOwned::to_owned)
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
