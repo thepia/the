@@ -170,6 +170,20 @@ pub const RULES: &[Rule] = &[
         stability: Default,
     },
     Rule {
+        code: "agent-ignored-field",
+        // The emission of the key registry's `used_by: []` data (crate::keys): a field the loader parses
+        // but never reads. Unlike `agent-unknown-key` (an open set, uncertain → beta), the ignored set is
+        // known with confidence from the loader source (agent37's lint-agents), so it is a default-on
+        // finding. Assistant-scoped (the ignored set is the Claude subagent loader's), like the other
+        // field rules.
+        label: "field silently ignored by the loader",
+        why: "the field is parsed but the subagent loader never reads it, so the behavior it expresses silently has no effect",
+        fix: "remove the field, or move its intent to one the assistant actually reads (e.g. settings/plugin config, not the subagent frontmatter)",
+        kind: Spec,
+        severity: Warn,
+        stability: Default,
+    },
+    Rule {
         code: "agent-unknown-key",
         // A closed key set is assistant- and tool-specific: other assistants and additional tools add
         // keys that do not disrupt the agent, so flagging "unknown" is a hardening opinion, not a

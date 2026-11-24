@@ -236,8 +236,8 @@ pub fn prop(key: &str) -> Option<&'static KeyProp> {
     KEYS.iter().find(|p| p.key == key)
 }
 
-/// Whether the loader reads `key` (false = parsed but ignored, i.e. empty `used_by`).
-#[allow(dead_code)]
+/// Whether the loader reads `key` (false = parsed but ignored, i.e. empty `used_by`). Drives the
+/// `agent-ignored-field` finding in [`crate::lint`].
 pub fn is_consumed(prop: &KeyProp) -> bool {
     !prop.used_by.is_empty()
 }

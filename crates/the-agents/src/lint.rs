@@ -166,14 +166,19 @@ fn check_description(parsed: &Parsed, out: &mut Vec<Finding>) {
 }
 
 /// Validate every frontmatter key off the [key registry](crate::keys): a key with no prop is unknown
-/// (the `agent-unknown-key` rule, staged behind `--beta`); a known key with a value constraint is
-/// checked against it. `name`/`description` carry their own dedicated checks and are skipped here.
+/// (the `agent-unknown-key` rule, staged behind `--beta`); a known key the loader does not read
+/// (`used_by` empty) is a silently-ignored field (`agent-ignored-field`); otherwise a known key with a
+/// value constraint is checked against it. `name`/`description` carry their own dedicated checks here.
 fn check_fields(parsed: &Parsed, out: &mut Vec<Finding>) {
     for (key, val) in &parsed.frontmatter {
         match keys::prop(key) {
             None => out.push(Finding::new(
                 "agent-unknown-key",
                 format!("`{key}` is not a known agent frontmatter key"),
+            )),
+            Some(prop) if !keys::is_consumed(prop) => out.push(Finding::new(
+                "agent-ignored-field",
+                format!("`{key}` is declared but the subagent loader ignores it"),
             )),
             Some(prop) => check_value(prop, key, val, out),
         }
@@ -336,6 +341,23 @@ mod tests {
         assert!(
             codes("---\nname: x\ndescription: handles various tasks across the whole codebase as required\n---\n", "x")
                 .contains(&"agent-description-vague")
+        );
+    }
+
+    #[test]
+    fn loader_ignored_field_fires_but_consumed_fields_do_not() {
+        let base = "---\nname: x\ndescription: a real sentence about what it does and when\n";
+        // Fields the Claude subagent loader silently ignores (used_by empty in the key registry).
+        for ignored in ["hooks", "mcpServers", "permissionMode", "initialPrompt"] {
+            assert!(
+                codes(&format!("{base}{ignored}: x\n---\n"), "x").contains(&"agent-ignored-field"),
+                "`{ignored}` should be flagged as loader-ignored"
+            );
+        }
+        // A consumed field (the loader reads it) is NOT an ignored-field finding.
+        assert!(
+            !codes(&format!("{base}model: sonnet\n---\n"), "x").contains(&"agent-ignored-field"),
+            "a consumed field is not flagged as ignored"
         );
     }
 
