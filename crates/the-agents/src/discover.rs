@@ -132,7 +132,8 @@ fn build_def(path: PathBuf, raw: &str, scope: Scope, assistant: &'static Assista
         .filter(|n| !n.is_empty())
         .map_or_else(|| file_stem.clone(), ToOwned::to_owned);
     let parent = path.parent().unwrap_or(Path::new("."));
-    let findings = lint::lint(&parsed, raw, &file_stem, parent, assistant);
+    let is_plugin = in_plugin(&path);
+    let findings = lint::lint(&parsed, raw, &file_stem, parent, assistant, is_plugin);
     AgentDef {
         name,
         file_stem,
@@ -141,7 +142,16 @@ fn build_def(path: PathBuf, raw: &str, scope: Scope, assistant: &'static Assista
         assistant,
         parsed,
         findings,
+        is_plugin,
     }
+}
+
+/// A definition is **plugin-packaged** when a `.claude-plugin/plugin.json` manifest sits at or above its
+/// directory (ST-08). Plugin subagents do not support `hooks`/`mcpServers`/`permissionMode`, so the
+/// field rules scope those to plugin agents only (agnix `CC-PL-014` detects plugins the same way).
+fn in_plugin(path: &Path) -> bool {
+    path.ancestors()
+        .any(|dir| dir.join(".claude-plugin").join("plugin.json").is_file())
 }
 
 #[cfg(test)]

@@ -57,6 +57,12 @@ const DESCRIPTORS: &[CommandDescriptor] = &[
         tier: Tier::Core,
         summary: "lint definitions for loadability, delegation, fields",
     },
+    CommandDescriptor {
+        path: "agents rules",
+        group: "agents",
+        tier: Tier::Aux,
+        summary: "list the lint rules and what each checks",
+    },
 ];
 
 impl Target for Agents {
@@ -121,6 +127,7 @@ fn build_agents(args: AgentsArgs, h: Human) -> Result<Built, Diagnostic> {
             build_list(&search, h, args.beta)
         }
         Some(AgentsCmd::Show { name }) => build_show(&name, &args.search, args.beta),
+        Some(AgentsCmd::Rules) => build_rules(),
         Some(AgentsCmd::Lint { target, all }) => {
             build_lint(target.as_deref(), &args.search, all, args.beta)
         }
@@ -437,6 +444,60 @@ fn show_report(d: &AgentDef) -> Report {
     Report::new()
         .record("agent", rec)
         .text("body", d.parsed.body.clone())
+}
+
+/// `the agents rules`: a static listing of the agent lint-rule registry. No scan, no discovery.
+fn build_rules() -> Result<Built, Diagnostic> {
+    Ok(Built {
+        report: Report::new().table("rules", rules_table()),
+        notices: Vec::new(),
+        findings: Vec::new(),
+        mode: DiagMode::Stream,
+        exit: 0,
+    })
+}
+
+/// One row per [`crate::rules::RULES`] entry. The JSON form is the machine-readable surface a
+/// conformance check reconciles against the spec register (every shipped `code` with its severity,
+/// gate, and kind), so it reads the one metadata table rather than restating the set anywhere. Mirrors
+/// the-skills' `rules_table`.
+fn rules_table() -> Table {
+    use crate::rules::{Kind, Severity, Stability};
+    let mut t = Table::new(vec![
+        Column::new("code", "CODE"),
+        Column::new("severity", "SEVERITY"),
+        Column::new("gate", "GATE"),
+        Column::new("what", "WHAT"),
+        Column::json_only("kind"),
+        Column::json_only("why"),
+        Column::json_only("fix"),
+    ]);
+    for r in crate::rules::RULES {
+        let (sev, tone) = match r.severity {
+            Severity::Error => ("error", Tone::Fail),
+            Severity::Warn => ("warning", Tone::Warn),
+            Severity::Note => ("note", Tone::Dim),
+        };
+        let gate = match r.stability {
+            Stability::Default => "default",
+            Stability::Beta => "beta",
+        };
+        let kind = match r.kind {
+            Kind::Breaking => "breaking",
+            Kind::Spec => "spec",
+            Kind::Security => "security",
+        };
+        t.push(vec![
+            r.code.into(),
+            Cell::toned(tone, sev),
+            gate.into(),
+            r.label.into(),
+            kind.into(),
+            r.why.into(),
+            r.fix.into(),
+        ]);
+    }
+    t
 }
 
 fn build_lint(
@@ -877,6 +938,7 @@ mod tests {
             &[
                 "the", "agents", "show", "reviewer", "--scope", "dir", "--dir", d,
             ],
+            &["the", "agents", "rules"],
         ];
         conformance::assert_matrix(&reg, matrix);
         let _ = fs::remove_dir_all(&dir);
@@ -1103,6 +1165,36 @@ mod tests {
             "the lint table surfaces the skills-reference issue, not just the summary"
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rules_lists_the_whole_registry_with_severity_and_gate() {
+        let results = run(&["the", "agents", "rules"]);
+
+        let plain = stdout_of(results.as_ref());
+        // Every rule in the registry is listed (no silent subset); beta rules included.
+        let listed = crate::rules::RULES
+            .iter()
+            .filter(|r| plain.contains(r.code))
+            .count();
+        assert_eq!(
+            listed,
+            crate::rules::RULES.len(),
+            "every registry rule is listed:\n{plain}"
+        );
+        assert!(plain.contains("agent-description-vague"), "beta rule shown");
+
+        // JSON carries the machine-readable fields a conformance reconciliation needs.
+        let mut j = Vec::new();
+        results.render(&mut j, Form::Json).unwrap();
+        let json = String::from_utf8(j).unwrap();
+        for field in ["\"code\"", "\"severity\"", "\"gate\"", "\"kind\""] {
+            assert!(json.contains(field), "json exposes {field}:\n{json}");
+        }
+        assert!(json.contains("\"agent-ignored-field\""));
+        // rules is static: no finding, exit 0.
+        assert!(results.diagnostics().is_empty());
+        assert_eq!(results.exit_code(), 0);
     }
 
     #[test]

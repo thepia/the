@@ -81,6 +81,7 @@ pub fn lint(
     file_stem: &str,
     parent: &Path,
     assistant: &'static Assistant,
+    is_plugin: bool,
 ) -> Vec<Finding> {
     let mut out = Vec::new();
 
@@ -99,7 +100,7 @@ pub fn lint(
     if assistant.id == assistants::claude().id {
         check_name(parsed, file_stem, &mut out);
         check_description(parsed, &mut out);
-        check_fields(parsed, &mut out);
+        check_fields(parsed, is_plugin, &mut out);
     }
     // Security smoke is universal (a secret or hidden control char is a hazard in any definition).
     check_security(parsed, raw, parent, &mut out);
@@ -166,20 +167,32 @@ fn check_description(parsed: &Parsed, out: &mut Vec<Finding>) {
 }
 
 /// Validate every frontmatter key off the [key registry](crate::keys): a key with no prop is unknown
-/// (the `agent-unknown-key` rule, staged behind `--beta`); a known key the loader does not read
-/// (`used_by` empty) is a silently-ignored field (`agent-ignored-field`); otherwise a known key with a
-/// value constraint is checked against it. `name`/`description` carry their own dedicated checks here.
-fn check_fields(parsed: &Parsed, out: &mut Vec<Finding>) {
+/// (the `agent-unknown-key` rule, staged behind `--beta`); a key with `value: Ignored` is never read on
+/// any subagent, so it is always a silently-ignored field (`agent-ignored-field`); a key read on a local
+/// subagent but unsupported in a plugin (`value: PluginIgnored`: `permissionMode`/`hooks`/`mcpServers`/
+/// `initialPrompt`, ST-08) is ignored ONLY when the definition is plugin-packaged; otherwise a known key
+/// with a value constraint is checked against it. `name`/`description` carry their own dedicated checks.
+fn check_fields(parsed: &Parsed, is_plugin: bool, out: &mut Vec<Finding>) {
+    use keys::ValueCheck::{Ignored, PluginIgnored};
     for (key, val) in &parsed.frontmatter {
         match keys::prop(key) {
             None => out.push(Finding::new(
                 "agent-unknown-key",
                 format!("`{key}` is not a known agent frontmatter key"),
             )),
-            Some(prop) if !keys::is_consumed(prop) => out.push(Finding::new(
+            Some(prop) if matches!(prop.value, Ignored) => out.push(Finding::new(
                 "agent-ignored-field",
                 format!("`{key}` is declared but the subagent loader ignores it"),
             )),
+            Some(prop) if matches!(prop.value, PluginIgnored) => {
+                // Read on a local subagent (valid, silent); unsupported only in a plugin (ST-08).
+                if is_plugin {
+                    out.push(Finding::new(
+                        "agent-ignored-field",
+                        format!("`{key}` is not supported on a plugin subagent (it is read only on a local agent)"),
+                    ));
+                }
+            }
             Some(prop) => check_value(prop, key, val, out),
         }
     }
@@ -190,11 +203,12 @@ fn check_fields(parsed: &Parsed, out: &mut Vec<Finding>) {
 /// unconstrained, or deferred-enforcement) carry an empty code and never fire here.
 fn check_value(prop: &keys::KeyProp, key: &str, val: &Value, out: &mut Vec<Finding>) {
     use keys::ValueCheck::{
-        AnyString, Bool, Closed, Ignored, Name, OpenString, PosInt, StringOrList, Text,
+        AnyString, Bool, Closed, Ignored, Name, OpenString, PluginIgnored, PosInt, StringOrList,
+        Text,
     };
     let (ok, message) = match prop.value {
-        // Handled by check_name / check_description, or carrying no value constraint.
-        Name | Text | AnyString | Bool | Ignored => return,
+        // Handled by check_name / check_description / check_fields, or carrying no value constraint.
+        Name | Text | AnyString | Bool | Ignored | PluginIgnored => return,
         OpenString => (
             matches!(val, Value::String(s) if !s.trim().is_empty()),
             format!("`{key}:` is empty or not a string"),
@@ -282,6 +296,11 @@ mod tests {
     use the_skills::parse::parse;
 
     fn codes(fm_and_body: &str, stem: &str) -> Vec<&'static str> {
+        codes_ctx(fm_and_body, stem, false)
+    }
+
+    /// Lint `fm_and_body` as a Claude definition, choosing local (`is_plugin=false`) or plugin context.
+    fn codes_ctx(fm_and_body: &str, stem: &str, is_plugin: bool) -> Vec<&'static str> {
         let parsed = parse(fm_and_body);
         lint(
             &parsed,
@@ -289,6 +308,7 @@ mod tests {
             stem,
             Path::new("/tmp"),
             assistants::claude(),
+            is_plugin,
         )
         .into_iter()
         .map(|f| f.code)
@@ -345,18 +365,25 @@ mod tests {
     }
 
     #[test]
-    fn loader_ignored_field_fires_but_consumed_fields_do_not() {
+    fn ignored_field_is_plugin_scoped_per_st08() {
         let base = "---\nname: x\ndescription: a real sentence about what it does and when\n";
-        // Fields the Claude subagent loader silently ignores (used_by empty in the key registry).
-        for ignored in ["hooks", "mcpServers", "permissionMode", "initialPrompt"] {
+        // Plugin-unsupported fields (ST-08): read on a LOCAL subagent (no finding), unsupported on a
+        // PLUGIN subagent (flagged). The the-agents defect was flagging these unconditionally.
+        for field in ["hooks", "mcpServers", "permissionMode", "initialPrompt"] {
+            let def = format!("{base}{field}: x\n---\n");
             assert!(
-                codes(&format!("{base}{ignored}: x\n---\n"), "x").contains(&"agent-ignored-field"),
-                "`{ignored}` should be flagged as loader-ignored"
+                !codes_ctx(&def, "x", false).contains(&"agent-ignored-field"),
+                "`{field}` is honored on a LOCAL subagent and must NOT be flagged"
+            );
+            assert!(
+                codes_ctx(&def, "x", true).contains(&"agent-ignored-field"),
+                "`{field}` is unsupported on a PLUGIN subagent and must be flagged"
             );
         }
-        // A consumed field (the loader reads it) is NOT an ignored-field finding.
+        // A consumed field (the loader reads it) is never an ignored-field finding.
         assert!(
-            !codes(&format!("{base}model: sonnet\n---\n"), "x").contains(&"agent-ignored-field"),
+            !codes_ctx(&format!("{base}model: sonnet\n---\n"), "x", true)
+                .contains(&"agent-ignored-field"),
             "a consumed field is not flagged as ignored"
         );
     }
@@ -385,7 +412,14 @@ mod tests {
         // A live-shaped AWS key (no placeholder marker like `example`/`test`, which smoke excludes).
         let text = "---\nname: x\ndescription: a real sentence about what it does and when\n---\nUse AWS key AKIA2E4RZ7KQ9X1V3B8N here\n";
         let parsed = parse(text);
-        let fs = lint(&parsed, text, "x", Path::new("/tmp"), assistants::claude());
+        let fs = lint(
+            &parsed,
+            text,
+            "x",
+            Path::new("/tmp"),
+            assistants::claude(),
+            false,
+        );
         let secret = fs.iter().find(|f| f.code == "exposed-secret");
         assert!(secret.is_some(), "a credential literal is flagged: {fs:?}");
         assert!(secret.unwrap().is_error());

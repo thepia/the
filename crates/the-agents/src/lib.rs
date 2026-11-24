@@ -55,6 +55,10 @@ pub struct AgentDef {
     pub scope: Scope,
     /// The assistant whose directory this definition was found in (and whose field rules apply).
     pub assistant: &'static Assistant,
+    /// Whether this definition is plugin-packaged (a `.claude-plugin/plugin.json` ancestor, ST-08).
+    /// Plugin subagents do not support `hooks`/`mcpServers`/`permissionMode`, so the field rules scope
+    /// those to plugin agents (see `agent-ignored-field`).
+    pub is_plugin: bool,
     /// The parsed frontmatter and body.
     pub parsed: Parsed,
     /// The lint findings for this definition (computed once at discovery).
@@ -116,6 +120,7 @@ mod tests {
             path: PathBuf::from("/tmp/x.md"),
             scope: Scope::Dir,
             assistant: assistants::claude(),
+            is_plugin: false,
             parsed: parse(frontmatter_and_body),
             findings: Vec::new(),
         }

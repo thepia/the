@@ -171,14 +171,15 @@ pub const RULES: &[Rule] = &[
     },
     Rule {
         code: "agent-ignored-field",
-        // The emission of the key registry's `used_by: []` data (crate::keys): a field the loader parses
-        // but never reads. Unlike `agent-unknown-key` (an open set, uncertain → beta), the ignored set is
-        // known with confidence from the loader source (agent37's lint-agents), so it is a default-on
-        // finding. Assistant-scoped (the ignored set is the Claude subagent loader's), like the other
-        // field rules.
-        label: "field silently ignored by the loader",
-        why: "the field is parsed but the subagent loader never reads it, so the behavior it expresses silently has no effect",
-        fix: "remove the field, or move its intent to one the assistant actually reads (e.g. settings/plugin config, not the subagent frontmatter)",
+        // Driven by the key registry's `value: PluginIgnored` data (crate::keys): hooks / mcpServers /
+        // permissionMode (and initialPrompt) are read on a LOCAL subagent but unsupported on a PLUGIN
+        // subagent (ST-08; docs name the first three). So this fires only when the definition is
+        // plugin-packaged (a `.claude-plugin/plugin.json` ancestor; agnix `CC-PL-014` scopes it the same
+        // way), never on a local agent where the fields are honored. Default-on; the plugin restriction
+        // is a hard, documented fact, not a hardening opinion.
+        label: "field unsupported on a plugin subagent",
+        why: "a plugin subagent does not support hooks/mcpServers/permissionMode (ST-08), so the field is silently ignored there (it is read only on a local subagent)",
+        fix: "remove the field from the plugin subagent, or move its intent to the plugin's own config (hooks in hooks/hooks.json, servers in .mcp.json); keep the agent local if it must read the field",
         kind: Spec,
         severity: Warn,
         stability: Default,

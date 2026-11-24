@@ -46,8 +46,13 @@ pub enum ValueCheck {
     StringOrList,
     /// Any string; no value constraint (e.g. `color`).
     AnyString,
-    /// The loader ignores this key; no value constraint. Recorded so it is not reported as "unknown".
+    /// The loader ignores this key on any subagent; no value constraint. Recorded so it is not reported
+    /// as "unknown". Drives an unconditional `agent-ignored-field` finding.
     Ignored,
+    /// Read on a LOCAL subagent but unsupported on a PLUGIN subagent (ST-08: plugin subagents do not
+    /// support hooks/mcpServers/permissionMode). No value constraint. Drives `agent-ignored-field` only
+    /// when the definition is plugin-packaged; on a local agent it is valid and silent.
+    PluginIgnored,
 }
 
 /// One frontmatter key and everything keyed off it.
@@ -68,7 +73,9 @@ pub struct KeyProp {
 }
 
 use Consumer::Assistant;
-use ValueCheck::{AnyString, Bool, Closed, Ignored, Name, OpenString, PosInt, StringOrList, Text};
+use ValueCheck::{
+    AnyString, Bool, Closed, Name, OpenString, PluginIgnored, PosInt, StringOrList, Text,
+};
 
 /// Claude Code `effort:` levels (closed set; frontmatter reference, checked 2026-11-23).
 pub const EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
@@ -194,40 +201,47 @@ pub const KEYS: &[KeyProp] = &[
         invalid_code: "",
         risk: "low",
     },
-    // Fields that look valid but the Claude plugin loader silently ignores (agent37's linter flags
-    // these). Recorded with an empty `used_by` so they are NOT reported as unknown; emitting a
-    // "declared but ignored" finding is deferred to the hardening (`--strict`) design.
+    // Plugin-unsupported fields: read on a LOCAL subagent, but a PLUGIN subagent does not support them
+    // (ST-08, verbatim: "plugin subagents don't support the hooks, mcpServers, or permissionMode
+    // frontmatter fields"). `used_by: [CLAUDE]` because the local subagent loader DOES read them (so
+    // they are never flagged on a local agent); `value: PluginIgnored` drives `agent-ignored-field`
+    // only when the definition is plugin-packaged. (agnix `CC-PL-014` scopes its check the same way.)
     KeyProp {
         key: "permissionMode",
-        purpose: "(declared but ignored by the subagent loader)",
-        used_by: &[],
-        value: Ignored,
+        purpose: "the subagent's permission mode (read on a local subagent; unsupported in a plugin)",
+        used_by: &[CLAUDE],
+        value: PluginIgnored,
         invalid_code: "",
-        risk: "silently has no effect",
+        risk: "ignored on a plugin subagent",
     },
     KeyProp {
         key: "hooks",
-        purpose: "(declared but ignored by the subagent loader)",
-        used_by: &[],
-        value: Ignored,
+        purpose: "lifecycle hooks for this subagent (read on a local subagent; unsupported in a plugin)",
+        used_by: &[CLAUDE],
+        value: PluginIgnored,
         invalid_code: "",
-        risk: "silently has no effect",
+        risk: "ignored on a plugin subagent",
     },
     KeyProp {
         key: "mcpServers",
-        purpose: "(declared but ignored by the subagent loader)",
-        used_by: &[],
-        value: Ignored,
+        purpose: "MCP servers for this subagent (read on a local subagent; unsupported in a plugin)",
+        used_by: &[CLAUDE],
+        value: PluginIgnored,
         invalid_code: "",
-        risk: "silently has no effect",
+        risk: "ignored on a plugin subagent",
     },
+    // initialPrompt: grouped with the plugin-unsupported fields (eslint's agent-plugin-ignored-fields
+    // treats it as honored on a local agent, ignored on a plugin). The docs' plugin restriction names
+    // only hooks/mcpServers/permissionMode, and the subagent-local status of initialPrompt is contested
+    // (eslint also has a main-conversation-only rule), so we take the conservative stance: never flag it
+    // on a local subagent (avoid the false positive this fix removes), flag it only in a plugin.
     KeyProp {
         key: "initialPrompt",
-        purpose: "(declared but ignored by the subagent loader)",
-        used_by: &[],
-        value: Ignored,
+        purpose: "initial prompt (read on a local subagent; unsupported in a plugin)",
+        used_by: &[CLAUDE],
+        value: PluginIgnored,
         invalid_code: "",
-        risk: "silently has no effect",
+        risk: "ignored on a plugin subagent",
     },
 ];
 
@@ -292,10 +306,18 @@ mod tests {
     }
 
     #[test]
-    fn ignored_fields_have_empty_used_by() {
+    fn plugin_unsupported_fields_are_modeled_per_st08() {
+        // Plugin-unsupported (ST-08 for the first three; initialPrompt grouped conservatively): read on
+        // a local subagent (so consumed, NOT flagged there), but `value: PluginIgnored` so the field
+        // rules flag them on a plugin subagent. This is the fix for the unconditional over-fire.
         for k in ["permissionMode", "hooks", "mcpServers", "initialPrompt"] {
             let p = prop(k).unwrap();
-            assert!(!is_consumed(p), "`{k}` should be recorded as ignored");
+            assert!(is_consumed(p), "`{k}` is read on a local subagent");
+            assert_eq!(
+                p.value,
+                ValueCheck::PluginIgnored,
+                "`{k}` is unsupported only in a plugin"
+            );
         }
     }
 }

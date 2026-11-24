@@ -40,6 +40,8 @@ pub enum AgentsCmd {
         /// The agent's name (frontmatter `name`, or its file name).
         name: String,
     },
+    /// List the lint rules `the agents lint` can emit: code, severity, gate, and what each checks.
+    Rules,
     /// Lint agent definitions for loadability, delegation quality, field validity, and security.
     Lint {
         /// An agent name to lint one definition, OR a relative or absolute PATH (one containing `/`,
