@@ -1254,13 +1254,15 @@ mod tests {
     fn lint_also_covers_instruction_files_in_the_same_scope() {
         // One `the agents lint` covers both agent definitions and the instruction files (CLAUDE.md /
         // AGENTS.md) in scope: a single lint command per group, not a separate one.
+        // A realistic project root: the agent lives in `.claude/agents`, the instruction file at the root.
         let dir =
             std::env::temp_dir().join(format!("the-agents-instr-lint-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join(".claude/agents")).unwrap();
         fs::create_dir_all(dir.join("docs")).unwrap();
         fs::write(dir.join("docs/guide.md"), "hi").unwrap();
         fs::write(
-            dir.join("reviewer.md"),
+            dir.join(".claude/agents/reviewer.md"),
             "---\nname: reviewer\ndescription: Review changed Rust files for correctness and risk\n---\n# body\n",
         )
         .unwrap();
@@ -1298,9 +1300,9 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("the-agents-instr-named-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        fs::create_dir_all(dir.join(".claude/agents")).unwrap();
         fs::write(
-            dir.join("reviewer.md"),
+            dir.join(".claude/agents/reviewer.md"),
             "---\nname: reviewer\ndescription: Review changed Rust files for correctness and risk\n---\n# body\n",
         )
         .unwrap();

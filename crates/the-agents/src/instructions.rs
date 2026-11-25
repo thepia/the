@@ -210,9 +210,14 @@ pub fn lint_file(path: &Path, raw: &str, home: Option<&Path>) -> Vec<Finding> {
         ));
     }
 
-    // Imports: each `@path` that does not resolve to a file.
+    // Imports: each `@path` that looks like a file path and does not resolve. The file-shape gate keeps
+    // prose `@mentions` and npm `@scope/pkg` references (e.g. `(@thepia/branding)`) from being read as
+    // broken imports.
     let dir = path.parent().unwrap_or(Path::new("."));
     for imp in extract_imports(raw) {
+        if !looks_like_import(&imp.path) {
+            continue;
+        }
         if !resolve_import(&imp.path, dir, home).is_file() {
             out.push(finding(
                 "instruction-broken-import",
@@ -336,6 +341,22 @@ fn imports_in_line(line: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// An `@token` is worth checking as an import only when it looks like a file path: an explicit path
+/// prefix (`~`, `/`, `./`, `../`) or a final component carrying a file extension (a `.`). A bare word or
+/// an `@scope/name` with no extension (an npm package, a prose `@mention`) is not flagged, so a CLAUDE.md
+/// that mentions `@thepia/branding` is not reported as a broken import. (A genuinely extensionless import
+/// is rare; the docs' examples all name files, so this favors precision over the rare case.)
+fn looks_like_import(path: &str) -> bool {
+    path.starts_with('~')
+        || path.starts_with('/')
+        || path.starts_with("./")
+        || path.starts_with("../")
+        || Path::new(path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.contains('.'))
 }
 
 /// Resolve an import path to a filesystem path per the docs: `~`/`~/...` expands to home; an absolute
@@ -489,6 +510,34 @@ An email user@example.com is not an import.
         let raw = "Token: ghp_abcdefghijklmnopqrstuvwxyz0123456789\n";
         let findings = lint_file(Path::new("/tmp/AGENTS.md"), raw, None);
         assert!(findings.iter().any(|f| f.code == "exposed-secret"));
+    }
+
+    #[test]
+    fn npm_package_mention_is_not_a_broken_import() {
+        // A CLAUDE.md that mentions an npm package `@scope/pkg` must NOT be flagged as a broken import;
+        // only file-shaped `@path` imports (with a path prefix or an extension) are checked.
+        let raw = "- **branding/** - Design tokens (@thepia/branding)\nSee @docs/missing.md too.\n";
+        let findings = lint_file(Path::new("/tmp/CLAUDE.md"), raw, None);
+        let broken: Vec<_> = findings
+            .iter()
+            .filter(|f| f.code == "instruction-broken-import")
+            .collect();
+        assert_eq!(
+            broken.len(),
+            1,
+            "only the file-shaped @docs/missing.md is flagged, not @thepia/branding: {findings:?}"
+        );
+        assert!(broken[0].message.contains("docs/missing.md"));
+    }
+
+    #[test]
+    fn looks_like_import_distinguishes_paths_from_mentions() {
+        assert!(looks_like_import("docs/guide.md")); // has an extension
+        assert!(looks_like_import("~/.claude/x.md")); // ~ prefix
+        assert!(looks_like_import("./local.md"));
+        assert!(looks_like_import("AGENTS.md"));
+        assert!(!looks_like_import("thepia/branding")); // npm scope, no extension
+        assert!(!looks_like_import("mention"));
     }
 
     #[test]

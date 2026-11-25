@@ -3,13 +3,14 @@
 //! A definition is a single `*.md` file in an assistant's agents directory. Discovery folds over the
 //! [assistant registry](crate::assistants): for each assistant it scans the project
 //! (`<project_subdir>` from the cwd up to the home directory) and the user (`$HOME/<user_subdir>`,
-//! unless `no_user`). A `--dir PATH` adds `PATH` itself (as Claude, the default for a bare directory of
-//! agent files) plus `PATH/<project_subdir>` per assistant, so a project or a bare agents directory can
-//! be scanned explicitly (and hermetically, with `--scope dir`).
+//! unless `no_user`). A `--dir PATH` is classified ([`classify`]) and scanned by what it is: a project
+//! root (has `.claude` / an instruction file) scans its `<project_subdir>`s only, a bare agents directory
+//! scans its `*.md`, and a workspace scans each project-root child. So a project root's loose docs
+//! (README.md, GOVERNANCE.md) are never read as agent definitions.
 
 use std::path::{Path, PathBuf};
 
-use the_skills::locate::Env;
+use the_skills::locate::{DirRole, Env, classify_dir};
 
 use crate::{AgentDef, Assistant, Scope, assistants, lint};
 
@@ -69,19 +70,67 @@ pub fn roots(env: &Env, dirs: &[PathBuf], no_user: bool) -> Vec<Root> {
         }
     }
 
-    // Each `--dir`: the directory itself (Claude rules, the default for a bare agents dir) plus each
-    // assistant's project subdirectory under it.
+    // Each `--dir`: classify what it points at and scan accordingly, so a project root's loose docs
+    // (README.md, GOVERNANCE.md) are never read as agent definitions.
     for d in dirs {
-        roots.push(root(d.clone(), Scope::Dir, assistants::claude()));
-        for assistant in assistants::ASSISTANTS {
-            let sub = d.join(assistant.project_subdir);
-            if &sub != d {
-                roots.push(root(sub, Scope::Dir, assistant));
-            }
-        }
+        expand_dir_root(d, &mut roots);
     }
 
     roots
+}
+
+/// Expand one `--dir` target into the roots to scan, per its [`classify_dir`] role (the shared
+/// directory classifier in `the-skills`, used by every dimension). A non-existent `--dir` is still added
+/// as a (non-existent) root so a missing path is reported, matching the prior behavior. Agent-specific
+/// part: a `Collection` is scanned as a bare agents directory (its `*.md` are agent files); a
+/// `ProjectRoot` is scanned by its `<project_subdir>`s; a `Workspace` by its project-root children.
+fn expand_dir_root(d: &Path, roots: &mut Vec<Root>) {
+    if !d.is_dir() {
+        roots.push(root(d.to_path_buf(), Scope::Dir, assistants::claude()));
+        return;
+    }
+    match classify_dir(d) {
+        DirRole::Collection => roots.push(root(d.to_path_buf(), Scope::Dir, assistants::claude())),
+        DirRole::ProjectRoot => push_project_subdirs(d, roots),
+        DirRole::Workspace => {
+            let mut children: Vec<PathBuf> = std::fs::read_dir(d)
+                .into_iter()
+                .flatten()
+                .filter_map(Result::ok)
+                .map(|e| e.path())
+                .filter(|p| p.is_dir())
+                .collect();
+            children.sort();
+            // One level only: a project-root child is scanned as a project; a bare agents-dir child
+            // (named `agents`) by its files. A workspace of workspaces is not recursed.
+            for c in children {
+                match classify_dir(&c) {
+                    DirRole::ProjectRoot => push_project_subdirs(&c, roots),
+                    DirRole::Collection if is_agents_dirname(&c) => {
+                        roots.push(root(c, Scope::Dir, assistants::claude()));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+/// Scan each assistant's `<project_subdir>` under a project root (e.g. `.claude/agents`), not its root.
+fn push_project_subdirs(d: &Path, roots: &mut Vec<Root>) {
+    for assistant in assistants::ASSISTANTS {
+        roots.push(root(
+            d.join(assistant.project_subdir),
+            Scope::Dir,
+            assistant,
+        ));
+    }
+}
+
+/// True when a directory's own name is the conventional agents-dir name (`agents`): used to decide which
+/// workspace children to scan as bare agent collections.
+fn is_agents_dirname(d: &Path) -> bool {
+    d.file_name().and_then(|n| n.to_str()) == Some("agents")
 }
 
 /// Read every `*.md` agent definition under the existing `roots`, parsing and linting each. Files are
@@ -166,6 +215,96 @@ mod tests {
 
     fn write(dir: &Path, name: &str, body: &str) {
         std::fs::write(dir.join(name), body).unwrap();
+    }
+
+    // No `name:` field, so the discovered name falls back to the file stem (reviewer / child).
+    const AGENT: &str = "---\ndescription: Review changed files for correctness and surface risky diffs\n---\n# b\n";
+
+    fn tmp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("the-agents-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn assistant_config_dirs_cover_every_registered_assistant() {
+        // The shared project-root detector (the_skills::locate::ASSISTANT_CONFIG_DIRS) must list every
+        // registered assistant's config dir, or a project root for that assistant would be misclassified.
+        for a in assistants::ASSISTANTS {
+            let first = Path::new(a.project_subdir)
+                .components()
+                .next()
+                .unwrap()
+                .as_os_str()
+                .to_str()
+                .unwrap();
+            assert!(
+                the_skills::locate::ASSISTANT_CONFIG_DIRS.contains(&first),
+                "assistant `{}` config dir `{first}` missing from ASSISTANT_CONFIG_DIRS",
+                a.id
+            );
+        }
+    }
+
+    #[test]
+    fn a_project_root_scans_claude_agents_not_loose_docs() {
+        // A `--dir` pointing at a project root (has `.claude`) scans `.claude/agents`, and its loose
+        // root docs (README.md, GOVERNANCE.md) are NOT read as agent definitions.
+        let dir = tmp("projroot");
+        std::fs::create_dir_all(dir.join(".claude/agents")).unwrap();
+        write(&dir.join(".claude/agents"), "reviewer.md", AGENT);
+        write(&dir, "README.md", "# readme, not an agent\n");
+        write(&dir, "GOVERNANCE.md", "# governance doc\n");
+
+        let mut roots = Vec::new();
+        expand_dir_root(&dir, &mut roots);
+        let (defs, _) = discover(&roots);
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(
+            names.contains(&"reviewer"),
+            "the real agent is found: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| *n == "README" || *n == "GOVERNANCE"),
+            "loose project docs are not agent definitions: {names:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_bare_agents_dir_still_scans_its_md_files() {
+        // A plain folder of agent files (no assistant config) is still scanned directly.
+        let dir = tmp("baredir");
+        write(&dir, "reviewer.md", AGENT);
+        let mut roots = Vec::new();
+        expand_dir_root(&dir, &mut roots);
+        let (defs, _) = discover(&roots);
+        assert!(defs.iter().any(|d| d.name == "reviewer"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_workspace_scans_project_children_not_its_own_docs() {
+        // A parent of project directories (itself not a project root) scans each child project's agents.
+        let ws = tmp("workspace");
+        std::fs::create_dir_all(ws.join("proj/.claude/agents")).unwrap();
+        write(&ws.join("proj/.claude/agents"), "child.md", AGENT);
+        write(&ws, "README.md", "# workspace readme\n");
+
+        let mut roots = Vec::new();
+        expand_dir_root(&ws, &mut roots);
+        let (defs, _) = discover(&roots);
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(
+            names.contains(&"child"),
+            "the child project's agent is found: {names:?}"
+        );
+        assert!(
+            !names.contains(&"README"),
+            "the workspace's own loose doc is not an agent"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
     }
 
     #[test]

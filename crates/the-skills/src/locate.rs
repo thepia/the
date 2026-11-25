@@ -149,6 +149,62 @@ fn dir_roots(base: &Path) -> Vec<SearchRoot> {
     roots
 }
 
+/// The known cross-tool assistant config directory names. Their presence at a directory marks it a
+/// **project root** (agents and skills live under them: `.claude/agents`, `.claude/skills`, …). Shared
+/// by every dimension's `--dir` discovery (agents, skills, assistants) so they classify a directory the
+/// same way. Kept in lockstep with the assistant registry by a drift test in `the-agents`.
+pub const ASSISTANT_CONFIG_DIRS: &[&str] = &[
+    ".claude",
+    ".agents",
+    ".opencode",
+    ".gemini",
+    ".goose",
+    ".pi",
+];
+
+/// The role a directory plays for config discovery, independent of WHAT is being discovered (agents,
+/// skills, assistant config). What to scan *within* a project root is dimension-specific; this only
+/// classifies the directory's shape, so a project root's loose docs are never mistaken for config files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirRole {
+    /// A bare collection of config files (no assistant config, no project-root children).
+    Collection,
+    /// A project root: holds an assistant config dir ([`ASSISTANT_CONFIG_DIRS`]) or an instruction file.
+    ProjectRoot,
+    /// A parent of project-root directories (a workspace of projects).
+    Workspace,
+}
+
+/// True when `d` is a project root: it holds an assistant config dir or a `CLAUDE.md` / `AGENTS.md`.
+pub fn is_project_root(d: &Path) -> bool {
+    ASSISTANT_CONFIG_DIRS.iter().any(|c| d.join(c).is_dir())
+        || d.join("CLAUDE.md").is_file()
+        || d.join("AGENTS.md").is_file()
+}
+
+/// True when any immediate child directory of `d` is a project root (so `d` is a workspace of projects).
+pub fn has_project_root_child(d: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(d) else {
+        return false;
+    };
+    entries
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .any(|p| p.is_dir() && is_project_root(&p))
+}
+
+/// Classify a directory's discovery role: a project root (has config), a workspace (has project-root
+/// children), or a bare collection (neither).
+pub fn classify_dir(d: &Path) -> DirRole {
+    if is_project_root(d) {
+        DirRole::ProjectRoot
+    } else if has_project_root_child(d) {
+        DirRole::Workspace
+    } else {
+        DirRole::Collection
+    }
+}
+
 /// Every root to search for the given `agents` (each in its precedence order), then `--dir` roots.
 pub fn plan_for(env: &Env, agents: &[Agent], extra: &[PathBuf]) -> Vec<SearchRoot> {
     let mut roots = Vec::new();

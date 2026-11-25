@@ -86,13 +86,21 @@ pub fn lint(
     let mut out = Vec::new();
 
     // A frontmatter parse/structure error means no fields can be trusted: report it and stop. Universal.
+    // The reused parser frames its message around `SKILL.md`; restate it for an agent definition so the
+    // diagnostic never names the wrong file type.
     if let Some(p) = &parsed.frontmatter_error {
-        let code = if p.code == "no-frontmatter" {
-            "agent-no-frontmatter"
+        let (code, message) = if p.code == "no-frontmatter" {
+            (
+                "agent-no-frontmatter",
+                "the file does not begin with a `---` YAML frontmatter block".to_owned(),
+            )
         } else {
-            "agent-frontmatter-invalid"
+            (
+                "agent-frontmatter-invalid",
+                "the YAML frontmatter does not parse".to_owned(),
+            )
         };
-        out.push(Finding::new(code, p.message.clone()));
+        out.push(Finding::new(code, message));
         return out;
     }
 
