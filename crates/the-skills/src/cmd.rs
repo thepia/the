@@ -88,6 +88,12 @@ const DESCRIPTORS: &[CommandDescriptor] = &[
         tier: Tier::Core,
         summary: "lint skills for loadability, spec, links, security",
     },
+    CommandDescriptor {
+        path: "skills rules",
+        group: "skills",
+        tier: Tier::Aux,
+        summary: "list the lint rules and what each checks",
+    },
 ];
 
 impl Target for Skills {
@@ -163,6 +169,7 @@ fn build_skills(args: SkillsArgs, format: Format, h: Human) -> Result<Built, Dia
             let search = with_positional(&args.search, path);
             build_dirs(&search)
         }
+        Some(SkillsCmd::Rules) => build_rules(),
         Some(SkillsCmd::Lint {
             target,
             all,
@@ -919,6 +926,60 @@ fn build_dirs(search: &SearchArgs) -> Result<Built, Diagnostic> {
     })
 }
 
+/// `the skills rules`: a static listing of the lint-rule registry. No scan, no catalog.
+fn build_rules() -> Result<Built, Diagnostic> {
+    Ok(Built {
+        report: Report::new().table("rules", rules_table()),
+        notices: Vec::new(),
+        findings: Vec::new(),
+        mode: DiagMode::Stream,
+        exit: 0,
+    })
+}
+
+/// One row per [`crate::rules::RULES`] entry. The JSON form is the machine-readable surface a
+/// conformance check reconciles against the spec register (every shipped `code` with its severity,
+/// gate, and kind), so it reads the one metadata table rather than restating the set anywhere.
+fn rules_table() -> Table {
+    use crate::rules::{Severity, Stability};
+    let mut t = Table::new(vec![
+        Column::new("code", "CODE"),
+        Column::new("severity", "SEVERITY"),
+        Column::new("gate", "GATE"),
+        Column::new("what", "WHAT"),
+        Column::json_only("kind"),
+        Column::json_only("why"),
+        Column::json_only("fix"),
+    ]);
+    for r in crate::rules::RULES {
+        let (sev, tone) = match r.severity {
+            Severity::Error => ("error", Tone::Fail),
+            Severity::Warn => ("warning", Tone::Warn),
+            Severity::Note => ("note", Tone::Dim),
+        };
+        let gate = match r.stability {
+            Stability::Default => "default",
+            Stability::Beta => "beta",
+        };
+        let kind = match r.kind {
+            ProblemKind::Breaking => "breaking",
+            ProblemKind::Spec => "spec",
+            ProblemKind::Asset => "asset",
+            ProblemKind::Security => "security",
+        };
+        t.push(vec![
+            r.code.into(),
+            Cell::toned(tone, sev),
+            gate.into(),
+            r.label.into(),
+            kind.into(),
+            r.why.into(),
+            r.fix.into(),
+        ]);
+    }
+    t
+}
+
 fn dir_name(skill_md: &Path) -> Option<String> {
     skill_md
         .parent()?
@@ -1613,6 +1674,7 @@ mod tests {
                 d,
             ],
             &["the", "skills", "dirs", "--scope", "dir", "--dir", d],
+            &["the", "skills", "rules"],
             &["the", "skills", "lint", "--scope", "dir", "--dir", d],
             &[
                 "the", "skills", "lint", "--all", "--scope", "dir", "--dir", d,
@@ -1774,6 +1836,50 @@ mod tests {
             &["the", "skills", "--dir", d, "--scope", "dir", "lint"],
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rules_lists_the_whole_registry_with_severity_and_gate() {
+        let sub = skills_matches(&["the", "skills", "rules"]);
+        let results = Skills
+            .execute(
+                &Invocation {
+                    target: "skills",
+                    matches: sub,
+                },
+                &plain_ctx(),
+            )
+            .unwrap();
+
+        let mut out = Vec::new();
+        results.render(&mut out, Form::Plain).unwrap();
+        let plain = String::from_utf8(out).unwrap();
+        // Every rule in the registry is listed (no silent subset); beta rules included.
+        let listed = crate::rules::RULES
+            .iter()
+            .filter(|r| plain.contains(r.code))
+            .count();
+        assert_eq!(
+            listed,
+            crate::rules::RULES.len(),
+            "every registry rule is listed:\n{plain}"
+        );
+        assert!(
+            plain.contains("description-vague-generic"),
+            "beta rule shown"
+        );
+
+        // JSON carries the machine-readable fields a conformance reconciliation needs.
+        let mut j = Vec::new();
+        results.render(&mut j, Form::Json).unwrap();
+        let json = String::from_utf8(j).unwrap();
+        for field in ["\"code\"", "\"severity\"", "\"gate\"", "\"kind\""] {
+            assert!(json.contains(field), "json exposes {field}:\n{json}");
+        }
+        assert!(json.contains("\"exposed-secret\""));
+        // rules is static: no finding, exit 0.
+        assert!(results.diagnostics().is_empty());
+        assert_eq!(results.exit_code(), 0);
     }
 
     #[test]

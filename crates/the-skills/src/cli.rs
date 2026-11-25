@@ -48,6 +48,8 @@ pub enum SkillsCmd {
         /// own skills are still included unless `--no-user`).
         path: Option<PathBuf>,
     },
+    /// List the lint rules `the skills lint` can emit: code, severity, gate, and what each checks.
+    Rules,
     /// Lint skills for agent loadability, spec conformance, broken local links, and security hazards.
     Lint {
         /// A skill name (frontmatter `name`, or its directory name) to lint one skill, OR a relative or

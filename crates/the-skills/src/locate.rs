@@ -127,11 +127,27 @@ const PROJECT_SKILL_HOMES: &[&str] = &[
     ".opencode/skills",
 ];
 
+/// Add each existing project skill-home under `base` (e.g. `<base>/.claude/skills`) as a recursive
+/// Dir-scope root. The skills-specific expansion of a project root, shared by the base case and the
+/// workspace case below.
+fn push_skill_homes(base: &Path, roots: &mut Vec<SearchRoot>) {
+    for sub in PROJECT_SKILL_HOMES {
+        let p = base.join(sub);
+        if p.is_dir() {
+            roots.push(root(None, Scope::Dir, p, Depth::Recursive, Hidden::SkipVcs));
+        }
+    }
+}
+
 /// The `Dir`-scope roots for an explicit `--dir`/positional `<base>`. `<base>` is always included as a
 /// skills root (its direct children are skills), so pointing straight at a `.../skills` directory still
-/// works and a non-existent `--dir` still surfaces the `dir-not-found` warning. In addition, `<base>`
-/// is treated as a **project root**: each project skill-home under it that exists is added (recursively,
-/// VCS dirs skipped), so `--dir <project>` finds `.claude/skills/*` etc. without naming the subdir.
+/// works and a non-existent `--dir` still surfaces the `dir-not-found` warning; plus each project
+/// skill-home under it (so `--dir <project>` finds `.claude/skills/*` without naming the subdir). When
+/// `<base>` is a **workspace** (a parent of project roots, per the shared [`classify_dir`]), each
+/// project-root child's skill-homes are also discovered, so `--dir <workspace>` finds skills across its
+/// child repos, matching how `the agents` scans a workspace. (A skill is a directory with a `SKILL.md`,
+/// so a project root's loose docs are never mistaken for skills; the role classification unifies the
+/// discovery semantics with agents rather than fixing a false positive.)
 fn dir_roots(base: &Path) -> Vec<SearchRoot> {
     let mut roots = vec![root(
         None,
@@ -140,13 +156,77 @@ fn dir_roots(base: &Path) -> Vec<SearchRoot> {
         Depth::OneLevel,
         Hidden::Include,
     )];
-    for sub in PROJECT_SKILL_HOMES {
-        let p = base.join(sub);
-        if p.is_dir() {
-            roots.push(root(None, Scope::Dir, p, Depth::Recursive, Hidden::SkipVcs));
+    push_skill_homes(base, &mut roots);
+    if base.is_dir() && classify_dir(base) == DirRole::Workspace {
+        let mut children: Vec<PathBuf> = std::fs::read_dir(base)
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.is_dir() && is_project_root(p))
+            .collect();
+        children.sort();
+        for c in &children {
+            push_skill_homes(c, &mut roots);
         }
     }
     roots
+}
+
+/// The known cross-tool assistant config directory names. Their presence at a directory marks it a
+/// **project root** (agents and skills live under them: `.claude/agents`, `.claude/skills`, …). Shared
+/// by every dimension's `--dir` discovery (agents, skills, assistants) so they classify a directory the
+/// same way. Kept in lockstep with the assistant registry by a drift test in `the-agents`.
+pub const ASSISTANT_CONFIG_DIRS: &[&str] = &[
+    ".claude",
+    ".agents",
+    ".opencode",
+    ".gemini",
+    ".goose",
+    ".pi",
+];
+
+/// The role a directory plays for config discovery, independent of WHAT is being discovered (agents,
+/// skills, assistant config). What to scan *within* a project root is dimension-specific; this only
+/// classifies the directory's shape, so a project root's loose docs are never mistaken for config files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirRole {
+    /// A bare collection of config files (no assistant config, no project-root children).
+    Collection,
+    /// A project root: holds an assistant config dir ([`ASSISTANT_CONFIG_DIRS`]) or an instruction file.
+    ProjectRoot,
+    /// A parent of project-root directories (a workspace of projects).
+    Workspace,
+}
+
+/// True when `d` is a project root: it holds an assistant config dir or a `CLAUDE.md` / `AGENTS.md`.
+pub fn is_project_root(d: &Path) -> bool {
+    ASSISTANT_CONFIG_DIRS.iter().any(|c| d.join(c).is_dir())
+        || d.join("CLAUDE.md").is_file()
+        || d.join("AGENTS.md").is_file()
+}
+
+/// True when any immediate child directory of `d` is a project root (so `d` is a workspace of projects).
+pub fn has_project_root_child(d: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(d) else {
+        return false;
+    };
+    entries
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .any(|p| p.is_dir() && is_project_root(&p))
+}
+
+/// Classify a directory's discovery role: a project root (has config), a workspace (has project-root
+/// children), or a bare collection (neither).
+pub fn classify_dir(d: &Path) -> DirRole {
+    if is_project_root(d) {
+        DirRole::ProjectRoot
+    } else if has_project_root_child(d) {
+        DirRole::Workspace
+    } else {
+        DirRole::Collection
+    }
 }
 
 /// Every root to search for the given `agents` (each in its precedence order), then `--dir` roots.
@@ -380,6 +460,33 @@ mod tests {
             "a project root's .claude/skills must be discovered: {dirs:?}"
         );
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_workspace_dir_discovers_each_child_project_skill_home() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let ws = std::env::temp_dir().join(format!(
+            "the-ws-ut-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::SeqCst)
+        ));
+        let _ = std::fs::remove_dir_all(&ws);
+        // A workspace (no config of its own) whose child `proj` is a project root with a skill.
+        std::fs::create_dir_all(ws.join("proj/.claude/skills/foo")).unwrap();
+        std::fs::write(
+            ws.join("proj/.claude/skills/foo/SKILL.md"),
+            "---\nname: foo\n---\n",
+        )
+        .unwrap();
+
+        let roots = plan_for(&env("/cwd", &[]), &[], std::slice::from_ref(&ws));
+        let dirs = dir_paths(&roots);
+        assert!(
+            dirs.iter().any(|p| p.ends_with("proj/.claude/skills")),
+            "a workspace scans each child project's .claude/skills: {dirs:?}"
+        );
+        let _ = std::fs::remove_dir_all(&ws);
     }
 
     #[test]

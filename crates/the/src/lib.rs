@@ -13,7 +13,9 @@ use the_output::command::{Registry, StreamState, dispatch};
 /// The built-in command registry: every command group is its own crate, registered here as a
 /// [`the_output::command::Target`]. Adding a group is a `register` + a crate dep, not a dispatch arm.
 fn registry() -> Registry {
-    Registry::new().register(Box::new(the_skills::Skills))
+    Registry::new()
+        .register(Box::new(the_skills::Skills))
+        .register(Box::new(the_agents::Agents))
 }
 
 pub fn run() -> ExitCode {

@@ -68,9 +68,15 @@ In the binary (`crates/the/src/lib.rs`):
 fn registry() -> Registry {
     Registry::new()
         .register(Box::new(the_skills::Skills))
-    //  .register(Box::new(the_agents::Agents))   // a new command: one line + a crate dep
+        .register(Box::new(the_agents::Agents))   // a new command: one line + a crate dep
 }
 ```
+
+The two command crates (`the-skills`, `the-agents`) both implement `Target` and both reuse the
+generic lint core (`the_skills::parse` for frontmatter, `the_skills::smoke` for security detection),
+each owning its own rule registry (`the_skills::rules`, `the_agents::rules`) for its field set. That is
+WORK-0036's "share the registry/rule machinery, specialize the key sets": `the-agents` is the proof the
+contract generalizes to a second real command, not just the pilot.
 
 ## Testing standard — wide coverage from small inputs
 
