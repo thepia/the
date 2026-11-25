@@ -7,7 +7,8 @@
 //! and **C4** (crash isolation + supervision). Claims C1/C2/C5/C6/C7/C8 are omitted here, so the
 //! reconciler reports them `pending` until later increments cover them.
 
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort};
 use serde_json::{Map, Value, json};
@@ -17,6 +18,7 @@ use crate::actors::faulty::FaultyMsg;
 use crate::actors::hub::{Hub, HubMsg, MAX_RESTARTS};
 use crate::actors::slow::{Slow, SlowMsg, SlowOutcome};
 use crate::actors::ticker::{Ticker, TickerMsg};
+use crate::watchdog::StallMonitor;
 
 // A tiny subscriber used to observe the stream verb.
 struct Collector;
@@ -274,6 +276,74 @@ async fn check_bounded_mailbox() -> Result<(), String> {
     }
 }
 
+// An actor that instruments its own handler time via a StallMonitor, and can be told to run a
+// synchronous (non-cooperative) blocking handler — the case tokio-console cannot see (break-finder S3).
+struct Blocker {
+    mon: Arc<StallMonitor>,
+}
+enum BlockerMsg {
+    /// Block the handler synchronously for `ms` (std::thread::sleep — blocks the worker).
+    Block(u64, RpcReplyPort<()>),
+    /// A well-behaved, fast handler.
+    Noop(RpcReplyPort<()>),
+}
+impl Actor for Blocker {
+    type Msg = BlockerMsg;
+    type State = ();
+    type Arguments = ();
+    async fn pre_start(
+        &self,
+        _m: ActorRef<Self::Msg>,
+        _a: (),
+    ) -> Result<Self::State, ActorProcessingErr> {
+        Ok(())
+    }
+    async fn handle(
+        &self,
+        _m: ActorRef<Self::Msg>,
+        msg: Self::Msg,
+        _s: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        let start = Instant::now();
+        let reply = match msg {
+            BlockerMsg::Block(ms, reply) => {
+                std::thread::sleep(Duration::from_millis(ms));
+                reply
+            }
+            BlockerMsg::Noop(reply) => reply,
+        };
+        self.mon.record(start.elapsed());
+        let _ = reply.send(());
+        Ok(())
+    }
+}
+
+// Break-finder S3: a synchronous/CPU-bound (blocking) handler must be DETECTED, not silently starving
+// the scheduler. The StallMonitor flags a 200ms blocking handler and attributes it; a fast handler is
+// not flagged.
+async fn check_blocking_handler_detected() -> Result<(), String> {
+    let mon = Arc::new(StallMonitor::new(Duration::from_millis(100)));
+    let (blocker, bh) = Actor::spawn(None, Blocker { mon: mon.clone() }, ())
+        .await
+        .map_err(|e| e.to_string())?;
+    ractor::call!(blocker, BlockerMsg::Noop).map_err(|e| e.to_string())?;
+    if mon.stalls() != 0 {
+        return Err("a fast handler was wrongly flagged as a stall".to_string());
+    }
+    ractor::call!(blocker, BlockerMsg::Block, 200u64).map_err(|e| e.to_string())?;
+    blocker.stop(None);
+    let _ = bh.await;
+    if mon.stalls() >= 1 && mon.max_micros() >= 150_000 {
+        Ok(())
+    } else {
+        Err(format!(
+            "blocking handler not detected: stalls={}, max_us={}",
+            mon.stalls(),
+            mon.max_micros()
+        ))
+    }
+}
+
 fn vector(result: Result<(), String>, evidence: &str) -> Value {
     match result {
         Ok(()) => json!({ "status": "pass", "evidence": evidence }),
@@ -333,6 +403,16 @@ pub async fn run() -> Value {
         break_vector(
             s2,
             "20k flood into a cap-1024 bounded sink with a slow consumer; excess is shed, memory bounded",
+        ),
+    );
+
+    // S3 (break-finder): a blocking/CPU-bound handler is detected, not silently starving.
+    let s3 = check_blocking_handler_detected().await;
+    vectors.insert(
+        "S3".to_string(),
+        break_vector(
+            s3,
+            "StallMonitor flags a 200ms synchronous handler (attributable); a fast handler is not flagged",
         ),
     );
 

@@ -12,6 +12,9 @@
 //! control socket (CLI-RPC + tail), the iroh node bridge, forked-instance supervision, and the AHP host.
 
 pub mod actors;
+pub mod watchdog;
+
+pub use watchdog::StallMonitor;
 
 /// Conformance self-report (WORK-0047), compiled only behind the `conformance` cargo feature.
 #[cfg(feature = "conformance")]
