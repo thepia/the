@@ -5,17 +5,22 @@
 use std::sync::Arc;
 
 use ractor::{Actor, ActorProcessingErr, ActorRef, OutputPort, RpcReplyPort};
+use tokio::sync::mpsc;
 
 pub struct Ticker;
 
 pub struct TickerState {
     out: Arc<OutputPort<String>>,
+    channels: Vec<mpsc::Sender<String>>,
 }
 
 /// Messages the `ticker` actor accepts.
 pub enum TickerMsg {
     /// Hand back the output port so a caller can subscribe its own actor to the stream.
     GetPort(RpcReplyPort<Arc<OutputPort<String>>>),
+    /// Subscribe an mpsc channel to the stream (used by the socket `tail` edge). The channel is
+    /// bounded, so a slow consumer sheds notes rather than growing memory unbounded.
+    SubscribeChannel(mpsc::Sender<String>),
     /// Fan a notification to every subscriber; the reply fires once the value has been published to
     /// the output port. Delivery to each subscriber is then forwarded on a separate task, so a caller
     /// that needs to observe receipt must poll the subscriber, not assume synchronous delivery.
@@ -34,6 +39,7 @@ impl Actor for Ticker {
     ) -> Result<Self::State, ActorProcessingErr> {
         Ok(TickerState {
             out: Arc::new(OutputPort::default()),
+            channels: Vec::new(),
         })
     }
 
@@ -49,8 +55,18 @@ impl Actor for Ticker {
                     let _ = reply.send(state.out.clone());
                 }
             }
+            TickerMsg::SubscribeChannel(tx) => {
+                state.channels.push(tx);
+            }
             TickerMsg::Emit(s, reply) => {
-                state.out.send(s);
+                state.out.send(s.clone());
+                // Fan to channel subscribers; drop closed ones, shed on a full (bounded) channel.
+                state.channels.retain(|c| {
+                    !matches!(
+                        c.try_send(s.clone()),
+                        Err(mpsc::error::TrySendError::Closed(_))
+                    )
+                });
                 if !reply.is_closed() {
                     let _ = reply.send(());
                 }

@@ -22,14 +22,14 @@ path = "src/bin/thepiad.rs"
 [dependencies]
 tokio = { workspace = true }
 ractor = { workspace = true }
-# Only pulled in by the `conformance` feature (the debug/dev report-emitting build flag).
-serde_json = { workspace = true, optional = true }
+# The control socket speaks length-prefixed JSON frames.
+serde_json = { workspace = true }
 
 [features]
 # A debug/dev compile flag: compiles in the conformance self-report (`thepiad --emit-conformance
 # <path>`), which exercises the core actors and writes the WORK-0047 claim report the spec repo
 # reconciles. Never enabled in a release build.
-conformance = ["dep:serde_json"]
+conformance = []
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

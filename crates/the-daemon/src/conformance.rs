@@ -3,9 +3,10 @@
 //! report (`agent/vectors/report.schema.json` in thepia-app-spec) that the spec repo's
 //! `cadence/check-daemon-conformance.py` reconciles against its claim manifest.
 //!
-//! Increment 1 (actor core) proves **C3** (request/reply + stream + cancel on the shared core actors)
-//! and **C4** (crash isolation + supervision). Claims C1/C2/C5/C6/C7/C8 are omitted here, so the
-//! reconciler reports them `pending` until later increments cover them.
+//! Covers, as of increment 2 (control socket): **C3** (request/reply + stream + cancel), **C4** (crash
+//! isolation + supervision), and break-finders **S1** (flood isolation), **S2** (bounded mailbox),
+//! **S3** (blocking-handler detection), **S4** (restart-storm bound), **S6** (oversized-frame guard on
+//! the control socket). The remaining claims are omitted, so the reconciler reports them `pending`.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -18,7 +19,9 @@ use crate::actors::faulty::FaultyMsg;
 use crate::actors::hub::{Hub, HubMsg, MAX_RESTARTS};
 use crate::actors::slow::{Slow, SlowMsg, SlowOutcome};
 use crate::actors::ticker::{Ticker, TickerMsg};
+use crate::socket::{self, Conn, Core};
 use crate::watchdog::StallMonitor;
+use tokio::sync::watch;
 
 // A tiny subscriber used to observe the stream verb.
 struct Collector;
@@ -344,6 +347,68 @@ async fn check_blocking_handler_detected() -> Result<(), String> {
     }
 }
 
+fn temp_sock(tag: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static N: AtomicU32 = AtomicU32::new(0);
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "thepiad-conf-{}-{tag}-{n}.sock",
+        std::process::id()
+    ))
+}
+
+// Break-finder S6: a frame claiming more than MAX_FRAME must be rejected BEFORE allocation (no
+// memory isolation → one oversized frame would otherwise OOM the whole daemon). The daemon must
+// survive the attack and keep serving.
+async fn check_oversized_frame_rejected() -> Result<(), String> {
+    let path = temp_sock("s6");
+    let (echo, _) = Actor::spawn(None, Echo, ())
+        .await
+        .map_err(|e| e.to_string())?;
+    let (ticker, _) = Actor::spawn(None, Ticker, ())
+        .await
+        .map_err(|e| e.to_string())?;
+    let core = Core {
+        echo: echo.clone(),
+        ticker: ticker.clone(),
+    };
+    let listener = socket::bind(&path).await.map_err(|e| e.to_string())?;
+    let (sd_tx, sd_rx) = watch::channel(false);
+    let server = tokio::spawn(socket::serve(listener, core, sd_rx));
+
+    let result = async {
+        let mut attacker = Conn::connect(&path).await.map_err(|e| e.to_string())?;
+        attacker
+            .send_len_prefix(u32::MAX)
+            .await
+            .map_err(|e| e.to_string())?;
+        let _ = attacker.recv().await; // the server closes the connection
+        drop(attacker);
+        let mut c = Conn::connect(&path).await.map_err(|e| e.to_string())?;
+        c.send(&json!({ "op": "ping", "msg": "alive" }))
+            .await
+            .map_err(|e| e.to_string())?;
+        let resp = c
+            .recv()
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or("server did not survive the oversized frame")?;
+        if resp.get("ok").and_then(|v| v.as_str()) == Some("alive") {
+            Ok(())
+        } else {
+            Err(format!("post-attack ping returned {resp:?}"))
+        }
+    }
+    .await;
+
+    let _ = sd_tx.send(true);
+    let _ = server.await;
+    echo.stop(None);
+    ticker.stop(None);
+    let _ = std::fs::remove_file(&path);
+    result
+}
+
 fn vector(result: Result<(), String>, evidence: &str) -> Value {
     match result {
         Ok(()) => json!({ "status": "pass", "evidence": evidence }),
@@ -426,9 +491,19 @@ pub async fn run() -> Value {
         ),
     );
 
+    // S6 (break-finder): an oversized control-socket frame is rejected before allocation.
+    let s6 = check_oversized_frame_rejected().await;
+    vectors.insert(
+        "S6".to_string(),
+        break_vector(
+            s6,
+            "a frame claiming u32::MAX bytes is rejected before allocation; the daemon survives and still serves ping",
+        ),
+    );
+
     json!({
         "generated_by": concat!("the-daemon ", env!("CARGO_PKG_VERSION"), " (feature=conformance)"),
-        "increment": "1: actor core",
+        "increment": "2: control socket",
         "vectors": Value::Object(vectors),
     })
 }
