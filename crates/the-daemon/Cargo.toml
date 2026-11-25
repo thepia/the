@@ -1,0 +1,27 @@
+# thepiad — the Thepia communications-hub daemon (WORK-0047 spike).
+# Thin crate: the daemon `main`, the ractor actor core, lifecycle, and the registration points edges
+# attach to. It implements little domain logic itself (ADR-0007; WORK-0046). The richer feature set is
+# re-implemented on the same seam in the private `cli` repo.
+[package]
+name = "the-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lib]
+name = "the_daemon"
+path = "src/lib.rs"
+
+[[bin]]
+name = "thepiad"
+path = "src/bin/thepiad.rs"
+
+[dependencies]
+tokio = { workspace = true }
+ractor = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

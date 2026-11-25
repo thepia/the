@@ -5,8 +5,11 @@
 # ONLY through `Results` (stdout) + diagnostics (stderr), which the pipeline writes. A command crate
 # must therefore never write output directly. This check fails if one does.
 #
-# Scope: `crates/the-*/src` except `the-output` (which owns the output primitives themselves). The
-# binary (`crates/the`) legitimately holds no command logic. Keep this wired into `just gate`.
+# Scope: `crates/the-*/src` except `the-output` (which owns the output primitives themselves) and
+# `the-daemon` (a resident daemon, NOT a command crate: per the cli-diagnostics rule it writes
+# lifecycle notices to stderr and returns structured diagnostics over its control socket, rather than
+# rendering through the CLI `Results` type). The binary (`crates/the`) legitimately holds no command
+# logic. Keep this wired into `just gate`.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -21,6 +24,7 @@ violations=0
 for dir in crates/the-*/; do
   name="$(basename "$dir")"
   [ "$name" = "the-output" ] && continue
+  [ "$name" = "the-daemon" ] && continue
   [ -d "$dir/src" ] || continue
   if hits="$(grep -rnE "$pattern" "$dir/src" 2>/dev/null)"; then
     echo "command-channels: $name writes output directly; route it through the_output::command::Results"
