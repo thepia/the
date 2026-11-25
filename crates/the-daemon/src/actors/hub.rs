@@ -1,25 +1,41 @@
 //! `hub` — the supervisor. It spawns a linked [`super::faulty::Faulty`] child and, when that child
-//! **fails** (panics), restarts it. Proves in-process crash isolation: one actor's crash is contained
-//! and auto-healed; the hub (and the daemon) stay up. This is the in-process half of the two-level
-//! supervision model (the out-of-process half is thepiad supervising sibling daemons / forked
-//! instances, WORK-0046/0047).
+//! **fails** (panics), restarts it — but **bounded by a meltdown cap** ([`MAX_RESTARTS`] restarts
+//! within [`WINDOW`]): a crash storm cannot spin forever; past the cap the hub stops restarting and
+//! marks itself `degraded` instead. Proves in-process crash isolation (one actor's crash is contained
+//! and auto-healed, the daemon stays up) AND that a restart storm is bounded (break-finder S4). This is
+//! the in-process half of the two-level supervision model (the out-of-process half is thepiad
+//! supervising sibling daemons / forked instances, WORK-0046/0047). The hand-rolled window cap here is
+//! the spike stand-in for the production `ractor-supervisor` meltdown policy named in ADR-0007.
+
+use std::time::{Duration, Instant};
 
 use ractor::{Actor, ActorProcessingErr, ActorRef, RpcReplyPort, SupervisionEvent};
 
 use super::faulty::{Faulty, FaultyMsg};
+
+/// Max child restarts allowed within [`WINDOW`] before the hub melts down (stops restarting).
+pub const MAX_RESTARTS: u32 = 5;
+/// The sliding window over which [`MAX_RESTARTS`] is counted.
+const WINDOW: Duration = Duration::from_secs(10);
 
 pub struct Hub;
 
 pub struct HubState {
     faulty: Option<ActorRef<FaultyMsg>>,
     restarts: u32,
+    /// Restart timestamps within the current window (pruned on each failure).
+    recent: Vec<Instant>,
+    /// Set once the meltdown cap trips; the child is no longer restarted.
+    degraded: bool,
 }
 
 pub enum HubMsg {
-    /// Current `faulty` child ref (its id changes across a restart).
+    /// Current `faulty` child ref (its id changes across a restart; `None` once degraded).
     FaultyRef(RpcReplyPort<Option<ActorRef<FaultyMsg>>>),
     /// How many times the child has been restarted.
     Restarts(RpcReplyPort<u32>),
+    /// Whether the meltdown cap has tripped (restart storm bounded).
+    Degraded(RpcReplyPort<bool>),
 }
 
 impl Actor for Hub {
@@ -36,6 +52,8 @@ impl Actor for Hub {
         Ok(HubState {
             faulty: Some(faulty),
             restarts: 0,
+            recent: Vec::new(),
+            degraded: false,
         })
     }
 
@@ -56,6 +74,11 @@ impl Actor for Hub {
                     let _ = reply.send(state.restarts);
                 }
             }
+            HubMsg::Degraded(reply) => {
+                if !reply.is_closed() {
+                    let _ = reply.send(state.degraded);
+                }
+            }
         }
         Ok(())
     }
@@ -74,8 +97,18 @@ impl Actor for Hub {
                 .as_ref()
                 .is_some_and(|f| f.get_id() == cell.get_id());
             if is_ours {
+                // Meltdown bound: prune restarts outside the window, and if the cap is already
+                // reached, stop restarting (mark degraded) rather than spinning on a crash storm.
+                let now = Instant::now();
+                state.recent.retain(|t| now.duration_since(*t) < WINDOW);
+                if state.recent.len() as u32 >= MAX_RESTARTS {
+                    state.faulty = None;
+                    state.degraded = true;
+                    return Ok(());
+                }
                 let (faulty, _) = Actor::spawn_linked(None, Faulty, (), myself.get_cell()).await?;
                 state.faulty = Some(faulty);
+                state.recent.push(now);
                 state.restarts += 1;
             }
         }

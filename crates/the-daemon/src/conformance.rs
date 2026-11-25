@@ -14,7 +14,7 @@ use serde_json::{Map, Value, json};
 
 use crate::actors::echo::{Echo, EchoMsg};
 use crate::actors::faulty::FaultyMsg;
-use crate::actors::hub::{Hub, HubMsg};
+use crate::actors::hub::{Hub, HubMsg, MAX_RESTARTS};
 use crate::actors::slow::{Slow, SlowMsg, SlowOutcome};
 use crate::actors::ticker::{Ticker, TickerMsg};
 
@@ -103,7 +103,15 @@ async fn check_stream() -> Result<(), String> {
     port.subscribe(coll.clone(), |s| Some(CollectorMsg::Note(s)));
     ractor::call!(ticker, TickerMsg::Emit, "a".to_string()).map_err(|e| e.to_string())?;
     ractor::call!(ticker, TickerMsg::Emit, "b".to_string()).map_err(|e| e.to_string())?;
-    let got = ractor::call!(coll, CollectorMsg::Drain).map_err(|e| e.to_string())?;
+    // OutputPort forwards to subscribers on a separate task, so poll until both notes arrive.
+    let mut got = Vec::new();
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        got = ractor::call!(coll, CollectorMsg::Drain).map_err(|e| e.to_string())?;
+        if got.len() >= 2 {
+            break;
+        }
+    }
     ticker.stop(None);
     coll.stop(None);
     let _ = th.await;
@@ -189,6 +197,83 @@ async fn check_flood_isolation() -> Result<(), String> {
     }
 }
 
+// Break-finder S4: a restart storm must be bounded. Crash the child faster than the meltdown cap; the
+// hub must stop restarting at MAX_RESTARTS and mark itself degraded, rather than spinning forever.
+async fn check_restart_storm_bounded() -> Result<(), String> {
+    let (hub, hh) = Actor::spawn(None, Hub, ())
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut last_id = ractor::call!(hub, HubMsg::FaultyRef)
+        .map_err(|e| e.to_string())?
+        .map(|f| f.get_id());
+    for _ in 0..(MAX_RESTARTS + 5) {
+        let Some(f) = ractor::call!(hub, HubMsg::FaultyRef).map_err(|e| e.to_string())? else {
+            break; // degraded: no child left to crash
+        };
+        f.cast(FaultyMsg::Panic).map_err(|e| e.to_string())?;
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            match ractor::call!(hub, HubMsg::FaultyRef).map_err(|e| e.to_string())? {
+                None => break,
+                Some(nf) if Some(nf.get_id()) != last_id => {
+                    last_id = Some(nf.get_id());
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }
+    let degraded = ractor::call!(hub, HubMsg::Degraded).map_err(|e| e.to_string())?;
+    let restarts = ractor::call!(hub, HubMsg::Restarts).map_err(|e| e.to_string())?;
+    hub.stop(None);
+    let _ = hh.await;
+    if degraded && restarts == MAX_RESTARTS {
+        Ok(())
+    } else {
+        Err(format!(
+            "storm not bounded: degraded={degraded}, restarts={restarts} (cap {MAX_RESTARTS})"
+        ))
+    }
+}
+
+// Break-finder S2: a bounded mailbox must hold under a fast-producer / slow-consumer flood. A bounded
+// channel sheds once full (try_send), so memory never grows past `cap` — the bounded-sink policy the
+// real edges adopt (ractor's own mailbox is unbounded, so edges wrap it in this).
+async fn check_bounded_mailbox() -> Result<(), String> {
+    use tokio::sync::mpsc;
+    let cap = 1024usize;
+    let (tx, mut rx) = mpsc::channel::<u64>(cap);
+    let consumer = tokio::spawn(async move {
+        let mut n = 0u64;
+        while rx.recv().await.is_some() {
+            n += 1;
+            tokio::time::sleep(Duration::from_micros(20)).await;
+            if n >= 1000 {
+                break;
+            }
+        }
+        n
+    });
+    let mut shed = 0u64;
+    let mut sent = 0u64;
+    for i in 0..20_000u64 {
+        match tx.try_send(i) {
+            Ok(()) => sent += 1,
+            Err(mpsc::error::TrySendError::Full(_)) => shed += 1,
+            Err(mpsc::error::TrySendError::Closed(_)) => break,
+        }
+    }
+    drop(tx);
+    let _ = consumer.await;
+    if shed > 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "bound did not engage under flood: sent {sent}, shed {shed}"
+        ))
+    }
+}
+
 fn vector(result: Result<(), String>, evidence: &str) -> Value {
     match result {
         Ok(()) => json!({ "status": "pass", "evidence": evidence }),
@@ -238,6 +323,26 @@ pub async fn run() -> Value {
         break_vector(
             s1,
             "20k-message flood of one actor; sibling echo still answers Ping within 2s",
+        ),
+    );
+
+    // S2 (break-finder): a bounded mailbox holds under a fast-producer / slow-consumer flood.
+    let s2 = check_bounded_mailbox().await;
+    vectors.insert(
+        "S2".to_string(),
+        break_vector(
+            s2,
+            "20k flood into a cap-1024 bounded sink with a slow consumer; excess is shed, memory bounded",
+        ),
+    );
+
+    // S4 (break-finder): a restart storm is bounded by the hub meltdown cap.
+    let s4 = check_restart_storm_bounded().await;
+    vectors.insert(
+        "S4".to_string(),
+        break_vector(
+            s4,
+            "crash storm past the cap; hub stops at MAX_RESTARTS and marks degraded (no infinite restart loop)",
         ),
     );
 

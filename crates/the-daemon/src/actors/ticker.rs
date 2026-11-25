@@ -16,8 +16,9 @@ pub struct TickerState {
 pub enum TickerMsg {
     /// Hand back the output port so a caller can subscribe its own actor to the stream.
     GetPort(RpcReplyPort<Arc<OutputPort<String>>>),
-    /// Fan a notification to every subscriber; the reply fires once the fan-out has been dispatched,
-    /// which makes ordering deterministic for callers that await it.
+    /// Fan a notification to every subscriber; the reply fires once the value has been published to
+    /// the output port. Delivery to each subscriber is then forwarded on a separate task, so a caller
+    /// that needs to observe receipt must poll the subscriber, not assume synchronous delivery.
     Emit(String, RpcReplyPort<()>),
 }
 
@@ -106,11 +107,18 @@ mod tests {
         let port = ractor::call!(ticker, TickerMsg::GetPort).expect("get port");
         port.subscribe(coll.clone(), |s| Some(CollectorMsg::Note(s)));
 
-        // Awaiting each Emit guarantees the Notes are enqueued on the collector before Drain.
         ractor::call!(ticker, TickerMsg::Emit, "a".to_string()).expect("emit a");
         ractor::call!(ticker, TickerMsg::Emit, "b".to_string()).expect("emit b");
 
-        let got = ractor::call!(coll, CollectorMsg::Drain).expect("drain");
+        // OutputPort forwards to subscribers on a separate task, so poll until both notes arrive.
+        let mut got = Vec::new();
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            got = ractor::call!(coll, CollectorMsg::Drain).expect("drain");
+            if got.len() >= 2 {
+                break;
+            }
+        }
         assert_eq!(got, vec!["a".to_string(), "b".to_string()]);
 
         ticker.stop(None);
