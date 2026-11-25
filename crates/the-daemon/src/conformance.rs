@@ -51,6 +51,35 @@ impl Actor for Collector {
     }
 }
 
+// A fire-and-forget sink used to flood one actor's mailbox (break-finder S1).
+struct Flood;
+enum FloodMsg {
+    Tick,
+}
+impl Actor for Flood {
+    type Msg = FloodMsg;
+    type State = u64;
+    type Arguments = ();
+    async fn pre_start(
+        &self,
+        _m: ActorRef<Self::Msg>,
+        _a: (),
+    ) -> Result<Self::State, ActorProcessingErr> {
+        Ok(0)
+    }
+    async fn handle(
+        &self,
+        _m: ActorRef<Self::Msg>,
+        msg: Self::Msg,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        match msg {
+            FloodMsg::Tick => *state += 1,
+        }
+        Ok(())
+    }
+}
+
 async fn check_request_reply() -> Result<(), String> {
     let (echo, h) = Actor::spawn(None, Echo, ())
         .await
@@ -130,10 +159,48 @@ async fn check_crash_isolation() -> Result<(), String> {
         .ok_or("faulty was not restarted".to_string())
 }
 
+// Break-finder S1: flooding one actor's mailbox must not starve a sibling actor. If the flood
+// monopolized the scheduler, the sibling's Ping would not answer within the deadline.
+async fn check_flood_isolation() -> Result<(), String> {
+    let (flood, fh) = Actor::spawn(None, Flood, ())
+        .await
+        .map_err(|e| e.to_string())?;
+    let (echo, eh) = Actor::spawn(None, Echo, ())
+        .await
+        .map_err(|e| e.to_string())?;
+    for _ in 0..20_000u32 {
+        flood.cast(FloodMsg::Tick).map_err(|e| e.to_string())?;
+    }
+    let answered = tokio::time::timeout(Duration::from_secs(2), async {
+        ractor::call!(echo, EchoMsg::Ping, "live".to_string())
+    })
+    .await;
+    flood.stop(None);
+    echo.stop(None);
+    let _ = fh.await;
+    let _ = eh.await;
+    match answered {
+        Err(_) => {
+            Err("sibling starved: Ping did not answer within 2s under a 20k flood".to_string())
+        }
+        Ok(Err(e)) => Err(format!("sibling ping errored: {e}")),
+        Ok(Ok(v)) if v == "live" => Ok(()),
+        Ok(Ok(v)) => Err(format!("sibling returned {v:?}")),
+    }
+}
+
 fn vector(result: Result<(), String>, evidence: &str) -> Value {
     match result {
         Ok(()) => json!({ "status": "pass", "evidence": evidence }),
         Err(e) => json!({ "status": "fail", "evidence": format!("{evidence}: {e}") }),
+    }
+}
+
+// A break-finder holds (`pass`) or finds a break (`break`) — never `fail` (break-finding is exploratory).
+fn break_vector(result: Result<(), String>, evidence: &str) -> Value {
+    match result {
+        Ok(()) => json!({ "status": "pass", "evidence": evidence }),
+        Err(e) => json!({ "status": "break", "evidence": format!("{evidence}: {e}") }),
     }
 }
 
@@ -161,6 +228,16 @@ pub async fn run() -> Value {
         vector(
             c4,
             "hub restarts a panicked faulty child; the daemon stays up",
+        ),
+    );
+
+    // S1 (break-finder): flooding one actor must not starve a sibling.
+    let s1 = check_flood_isolation().await;
+    vectors.insert(
+        "S1".to_string(),
+        break_vector(
+            s1,
+            "20k-message flood of one actor; sibling echo still answers Ping within 2s",
         ),
     );
 
