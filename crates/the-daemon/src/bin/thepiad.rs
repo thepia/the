@@ -87,6 +87,11 @@ fn main() {
                 eprintln!("thepiad: wrote conformance report to {path}");
                 return;
             }
+            if arg == "--perf" {
+                let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+                rt.block_on(the_daemon::perf::run());
+                return;
+            }
         }
     }
 

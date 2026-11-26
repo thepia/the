@@ -37,6 +37,14 @@ conformance-report:
     . scripts/sccache-env.sh
     cargo run --quiet --features conformance --bin thepiad -- --emit-conformance target/daemon-conformance-report.json
 
+# Measure thepiad latency (WORK-0047): in-process actor-call overhead + control-socket ping
+# round-trip (p50/p99/max), behind the `conformance` dev feature. Prints numbers; not a gate.
+perf:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    . scripts/sccache-env.sh
+    cargo run --quiet --release --features conformance --bin thepiad -- --perf
+
 # Unit tests only (the pre-commit hook gate).
 test-unit:
     #!/usr/bin/env bash

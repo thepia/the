@@ -22,6 +22,10 @@ pub use watchdog::StallMonitor;
 #[cfg(feature = "conformance")]
 pub mod conformance;
 
+/// Performance harness (WORK-0047), compiled only behind the `conformance` cargo feature.
+#[cfg(feature = "conformance")]
+pub mod perf;
+
 pub use actors::echo::{Echo, EchoMsg};
 pub use actors::faulty::{Faulty, FaultyMsg};
 pub use actors::hub::{Hub, HubMsg};
