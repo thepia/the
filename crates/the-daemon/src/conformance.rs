@@ -409,6 +409,81 @@ async fn check_oversized_frame_rejected() -> Result<(), String> {
     result
 }
 
+// Break-finder S10: flooding one edge must not starve an unrelated edge (hub edge-isolation). Sustain
+// a flood on the `emit` (ticker) edge while measuring `ping` (echo) latency; the unrelated edge must
+// stay responsive. (The rigorous open-loop/HdrHistogram p99-knee version is the nightly S10 job.)
+async fn check_edge_isolation() -> Result<(), String> {
+    let path = temp_sock("s10");
+    let (echo, _) = Actor::spawn(None, Echo, ())
+        .await
+        .map_err(|e| e.to_string())?;
+    let (ticker, _) = Actor::spawn(None, Ticker, ())
+        .await
+        .map_err(|e| e.to_string())?;
+    let core = Core {
+        echo: echo.clone(),
+        ticker: ticker.clone(),
+    };
+    let listener = socket::bind(&path).await.map_err(|e| e.to_string())?;
+    let (sd_tx, sd_rx) = watch::channel(false);
+    let server = tokio::spawn(socket::serve(listener, core, sd_rx));
+
+    let result = async {
+        // Sustained flood on the emit (ticker) edge.
+        let flood: Vec<_> = (0..16)
+            .map(|_| {
+                let p = path.clone();
+                tokio::spawn(async move {
+                    for _ in 0..60 {
+                        if let Ok(mut c) = Conn::connect(&p).await {
+                            let _ = c.send(&json!({ "op": "emit", "msg": "x" })).await;
+                            let _ = c.recv().await;
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        // Concurrently measure the ping (echo) edge; it must stay responsive.
+        let mut max_ms = 0u128;
+        for _ in 0..15 {
+            let start = Instant::now();
+            let mut c = Conn::connect(&path).await.map_err(|e| e.to_string())?;
+            c.send(&json!({ "op": "ping", "msg": "p" }))
+                .await
+                .map_err(|e| e.to_string())?;
+            let resp = c
+                .recv()
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or("no ping response under emit flood")?;
+            if resp.get("ok").and_then(|v| v.as_str()) != Some("p") {
+                return Err(format!("ping under load returned {resp:?}"));
+            }
+            max_ms = max_ms.max(start.elapsed().as_millis());
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        for f in flood {
+            let _ = f.await;
+        }
+        if max_ms < 500 {
+            Ok(())
+        } else {
+            Err(format!(
+                "ping p-max {max_ms}ms under emit flood — unrelated edge was starved"
+            ))
+        }
+    }
+    .await;
+
+    let _ = sd_tx.send(true);
+    let _ = server.await;
+    echo.stop(None);
+    ticker.stop(None);
+    let _ = std::fs::remove_file(&path);
+    result
+}
+
 fn vector(result: Result<(), String>, evidence: &str) -> Value {
     match result {
         Ok(()) => json!({ "status": "pass", "evidence": evidence }),
@@ -498,6 +573,16 @@ pub async fn run() -> Value {
         break_vector(
             s6,
             "a frame claiming u32::MAX bytes is rejected before allocation; the daemon survives and still serves ping",
+        ),
+    );
+
+    // S10 (break-finder): flooding one edge does not starve an unrelated edge.
+    let s10 = check_edge_isolation().await;
+    vectors.insert(
+        "S10".to_string(),
+        break_vector(
+            s10,
+            "sustained emit-edge flood; ping-edge p-max stays under 500ms (envelope-load isolation; HdrHistogram knee is the nightly job)",
         ),
     );
 
