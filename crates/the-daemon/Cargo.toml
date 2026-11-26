@@ -24,6 +24,9 @@ tokio = { workspace = true }
 ractor = { workspace = true }
 # The control socket speaks length-prefixed JSON frames.
 serde_json = { workspace = true }
+# AHP host: WebSocket + JSON-RPC.
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
 
 [features]
 # A debug/dev compile flag: compiles in the conformance self-report (`thepiad --emit-conformance

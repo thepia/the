@@ -12,6 +12,7 @@
 //! control socket (CLI-RPC + tail), the iroh node bridge, forked-instance supervision, and the AHP host.
 
 pub mod actors;
+pub mod ahp;
 pub mod socket;
 pub mod watchdog;
 

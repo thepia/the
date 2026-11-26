@@ -19,8 +19,10 @@ use crate::actors::faulty::FaultyMsg;
 use crate::actors::hub::{Hub, HubMsg, MAX_RESTARTS};
 use crate::actors::slow::{Slow, SlowMsg, SlowOutcome};
 use crate::actors::ticker::{Ticker, TickerMsg};
+use crate::ahp::{self, AhpClient, Channel};
 use crate::socket::{self, Conn, Core, Edge, EdgeCtx, EdgeFuture, EdgeRegistry};
 use crate::watchdog::StallMonitor;
+use tokio::net::TcpListener;
 use tokio::sync::watch;
 
 // A tiny subscriber used to observe the stream verb.
@@ -562,6 +564,87 @@ async fn check_edge_registration() -> Result<(), String> {
     result
 }
 
+// Claim C7: two wire formats land on one core. The unix control socket (length-prefixed JSON frames)
+// and the AHP WebSocket (JSON-RPC) run on the same ractor actor system; a unix `ping` and an AHP
+// `subscribe` both succeed against one running daemon.
+async fn check_two_wire_formats() -> Result<(), String> {
+    // Unix control socket on the shared actor system.
+    let upath = temp_sock("c7");
+    let (echo, _) = Actor::spawn(None, Echo, ())
+        .await
+        .map_err(|e| e.to_string())?;
+    let (ticker, _) = Actor::spawn(None, Ticker, ())
+        .await
+        .map_err(|e| e.to_string())?;
+    let core = Core {
+        echo: echo.clone(),
+        ticker: ticker.clone(),
+    };
+    let ul = socket::bind(&upath).await.map_err(|e| e.to_string())?;
+    let (usd_tx, usd_rx) = watch::channel(false);
+    let userver = tokio::spawn(socket::serve(
+        ul,
+        core,
+        Arc::new(EdgeRegistry::with_builtins()),
+        usd_rx,
+    ));
+
+    // AHP WebSocket host on the same actor system.
+    let (channel, _) = Actor::spawn(None, Channel, ())
+        .await
+        .map_err(|e| e.to_string())?;
+    let wl = TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|e| e.to_string())?;
+    let waddr = wl.local_addr().map_err(|e| e.to_string())?;
+    let (wsd_tx, wsd_rx) = watch::channel(false);
+    let wserver = tokio::spawn(ahp::serve_ahp(wl, channel.clone(), wsd_rx));
+
+    let result = async {
+        // thepia-proto-style unix frame edge.
+        let mut c = Conn::connect(&upath).await.map_err(|e| e.to_string())?;
+        c.send(&json!({ "op": "ping", "msg": "u" }))
+            .await
+            .map_err(|e| e.to_string())?;
+        let r = c
+            .recv()
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or("no unix ping response")?;
+        if r.get("ok").and_then(|v| v.as_str()) != Some("u") {
+            return Err(format!("unix ping returned {r:?}"));
+        }
+        // AHP WebSocket edge.
+        let mut a = AhpClient::connect(waddr).await.map_err(|e| e.to_string())?;
+        let init = a
+            .request("initialize", json!({}))
+            .await
+            .map_err(|e| e.to_string())?;
+        if init.get("protocolVersion").and_then(|v| v.as_str()) != Some(ahp::PROTOCOL_VERSION) {
+            return Err(format!("AHP initialize returned {init:?}"));
+        }
+        let snap = a
+            .request("subscribe", json!({ "channel": "ahp-root://" }))
+            .await
+            .map_err(|e| e.to_string())?;
+        if snap.get("serverSeq").is_none() {
+            return Err(format!("AHP subscribe returned {snap:?}"));
+        }
+        Ok(())
+    }
+    .await;
+
+    let _ = usd_tx.send(true);
+    let _ = wsd_tx.send(true);
+    let _ = userver.await;
+    let _ = wserver.await;
+    echo.stop(None);
+    ticker.stop(None);
+    channel.stop(None);
+    let _ = std::fs::remove_file(&upath);
+    result
+}
+
 fn vector(result: Result<(), String>, evidence: &str) -> Value {
     match result {
         Ok(()) => json!({ "status": "pass", "evidence": evidence }),
@@ -611,6 +694,16 @@ pub async fn run() -> Value {
         vector(
             c2,
             "a fake `pong` edge registered into the registry routes with zero dispatch change; builtins undisturbed",
+        ),
+    );
+
+    // C7: two wire formats (unix frames + AHP WebSocket) land on one actor core.
+    let c7 = check_two_wire_formats().await;
+    vectors.insert(
+        "C7".to_string(),
+        vector(
+            c7,
+            "a unix-socket ping and an AHP WebSocket initialize+subscribe both succeed against one running actor system",
         ),
     );
 
@@ -676,7 +769,7 @@ pub async fn run() -> Value {
 
     json!({
         "generated_by": concat!("the-daemon ", env!("CARGO_PKG_VERSION"), " (feature=conformance)"),
-        "increment": "2: control socket",
+        "increment": "3: AHP host",
         "vectors": Value::Object(vectors),
     })
 }
