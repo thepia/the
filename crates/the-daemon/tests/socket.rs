@@ -3,6 +3,7 @@
 //! without taking the daemon down.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
@@ -10,7 +11,7 @@ use ractor::{Actor, ActorRef};
 use serde_json::json;
 use the_daemon::actors::echo::EchoMsg;
 use the_daemon::actors::ticker::TickerMsg;
-use the_daemon::socket::{self, Conn, Core};
+use the_daemon::socket::{self, Conn, Core, Edge, EdgeCtx, EdgeFuture, EdgeRegistry};
 use the_daemon::{Echo, Ticker};
 use tokio::sync::watch;
 
@@ -30,6 +31,10 @@ struct Server {
 
 impl Server {
     async fn start(tag: &str) -> Self {
+        Self::start_with(tag, EdgeRegistry::with_builtins()).await
+    }
+
+    async fn start_with(tag: &str, registry: EdgeRegistry) -> Self {
         let path = temp_sock(tag);
         let (echo, _) = Actor::spawn(None, Echo, ()).await.expect("echo");
         let (ticker, _) = Actor::spawn(None, Ticker, ()).await.expect("ticker");
@@ -39,7 +44,7 @@ impl Server {
         };
         let listener = socket::bind(&path).await.expect("bind");
         let (sd_tx, sd_rx) = watch::channel(false);
-        let handle = tokio::spawn(socket::serve(listener, core, sd_rx));
+        let handle = tokio::spawn(socket::serve(listener, core, Arc::new(registry), sd_rx));
         Server {
             path,
             sd_tx,
@@ -94,6 +99,40 @@ async fn tail_streams_an_emitted_note() {
         .expect("recv ok")
         .expect("some note");
     assert_eq!(note.get("note").and_then(|v| v.as_str()), Some("tick"));
+
+    srv.stop().await;
+}
+
+#[test]
+fn builtin_edge_ops_are_ping_emit_subscribe() {
+    assert_eq!(
+        EdgeRegistry::with_builtins().ops(),
+        vec!["ping", "emit", "subscribe"]
+    );
+}
+
+// A fake edge defined outside the socket module, proving an edge is a drop-in adapter.
+struct PongEdge;
+impl Edge for PongEdge {
+    fn op(&self) -> &'static str {
+        "pong"
+    }
+    fn handle<'a>(&'a self, mut ctx: EdgeCtx<'a>) -> EdgeFuture<'a> {
+        Box::pin(async move { ctx.reply(&json!({ "ok": "pong" })).await })
+    }
+}
+
+#[tokio::test]
+async fn a_registered_edge_routes_with_zero_dispatch_change() {
+    // Registering an edge is the ONLY change needed — serve/handle_conn are untouched (C2).
+    let mut reg = EdgeRegistry::with_builtins();
+    reg.register(Box::new(PongEdge));
+    let srv = Server::start_with("c2", reg).await;
+
+    let mut c = Conn::connect(&srv.path).await.expect("connect");
+    c.send(&json!({"op":"pong"})).await.expect("send");
+    let resp = c.recv().await.expect("recv").expect("some response");
+    assert_eq!(resp.get("ok").and_then(|v| v.as_str()), Some("pong"));
 
     srv.stop().await;
 }

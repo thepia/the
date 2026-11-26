@@ -19,7 +19,7 @@ use crate::actors::faulty::FaultyMsg;
 use crate::actors::hub::{Hub, HubMsg, MAX_RESTARTS};
 use crate::actors::slow::{Slow, SlowMsg, SlowOutcome};
 use crate::actors::ticker::{Ticker, TickerMsg};
-use crate::socket::{self, Conn, Core};
+use crate::socket::{self, Conn, Core, Edge, EdgeCtx, EdgeFuture, EdgeRegistry};
 use crate::watchdog::StallMonitor;
 use tokio::sync::watch;
 
@@ -374,7 +374,12 @@ async fn check_oversized_frame_rejected() -> Result<(), String> {
     };
     let listener = socket::bind(&path).await.map_err(|e| e.to_string())?;
     let (sd_tx, sd_rx) = watch::channel(false);
-    let server = tokio::spawn(socket::serve(listener, core, sd_rx));
+    let server = tokio::spawn(socket::serve(
+        listener,
+        core,
+        Arc::new(EdgeRegistry::with_builtins()),
+        sd_rx,
+    ));
 
     let result = async {
         let mut attacker = Conn::connect(&path).await.map_err(|e| e.to_string())?;
@@ -426,7 +431,12 @@ async fn check_edge_isolation() -> Result<(), String> {
     };
     let listener = socket::bind(&path).await.map_err(|e| e.to_string())?;
     let (sd_tx, sd_rx) = watch::channel(false);
-    let server = tokio::spawn(socket::serve(listener, core, sd_rx));
+    let server = tokio::spawn(socket::serve(
+        listener,
+        core,
+        Arc::new(EdgeRegistry::with_builtins()),
+        sd_rx,
+    ));
 
     let result = async {
         // Sustained flood on the emit (ticker) edge.
@@ -484,6 +494,74 @@ async fn check_edge_isolation() -> Result<(), String> {
     result
 }
 
+// Claim C2: adding an edge is "register an adapter" with ZERO change to dispatch/core. Register a
+// fake `pong` edge into the registry; it must route, and the builtins must be undisturbed.
+async fn check_edge_registration() -> Result<(), String> {
+    struct PongEdge;
+    impl Edge for PongEdge {
+        fn op(&self) -> &'static str {
+            "pong"
+        }
+        fn handle<'a>(&'a self, mut ctx: EdgeCtx<'a>) -> EdgeFuture<'a> {
+            Box::pin(async move { ctx.reply(&json!({ "ok": "pong" })).await })
+        }
+    }
+
+    let path = temp_sock("c2");
+    let (echo, _) = Actor::spawn(None, Echo, ())
+        .await
+        .map_err(|e| e.to_string())?;
+    let (ticker, _) = Actor::spawn(None, Ticker, ())
+        .await
+        .map_err(|e| e.to_string())?;
+    let core = Core {
+        echo: echo.clone(),
+        ticker: ticker.clone(),
+    };
+    let mut registry = EdgeRegistry::with_builtins();
+    registry.register(Box::new(PongEdge));
+    let listener = socket::bind(&path).await.map_err(|e| e.to_string())?;
+    let (sd_tx, sd_rx) = watch::channel(false);
+    let server = tokio::spawn(socket::serve(listener, core, Arc::new(registry), sd_rx));
+
+    let result = async {
+        let mut c = Conn::connect(&path).await.map_err(|e| e.to_string())?;
+        c.send(&json!({ "op": "pong" }))
+            .await
+            .map_err(|e| e.to_string())?;
+        let resp = c
+            .recv()
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or("no response from the registered edge")?;
+        if resp.get("ok").and_then(|v| v.as_str()) != Some("pong") {
+            return Err(format!("registered edge returned {resp:?}"));
+        }
+        // The builtins still route (the drop-in did not disturb dispatch).
+        let mut c2 = Conn::connect(&path).await.map_err(|e| e.to_string())?;
+        c2.send(&json!({ "op": "ping", "msg": "hi" }))
+            .await
+            .map_err(|e| e.to_string())?;
+        let resp2 = c2
+            .recv()
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or("no ping response")?;
+        if resp2.get("ok").and_then(|v| v.as_str()) != Some("hi") {
+            return Err(format!("builtin ping disturbed: {resp2:?}"));
+        }
+        Ok(())
+    }
+    .await;
+
+    let _ = sd_tx.send(true);
+    let _ = server.await;
+    echo.stop(None);
+    ticker.stop(None);
+    let _ = std::fs::remove_file(&path);
+    result
+}
+
 fn vector(result: Result<(), String>, evidence: &str) -> Value {
     match result {
         Ok(()) => json!({ "status": "pass", "evidence": evidence }),
@@ -523,6 +601,16 @@ pub async fn run() -> Value {
         vector(
             c4,
             "hub restarts a panicked faulty child; the daemon stays up",
+        ),
+    );
+
+    // C2: adding an edge is "register an adapter" with zero dispatch/core change.
+    let c2 = check_edge_registration().await;
+    vectors.insert(
+        "C2".to_string(),
+        vector(
+            c2,
+            "a fake `pong` edge registered into the registry routes with zero dispatch change; builtins undisturbed",
         ),
     );
 

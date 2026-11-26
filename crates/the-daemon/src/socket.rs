@@ -1,14 +1,22 @@
-//! The thepiad control socket (WORK-0047 increment 2) — a Unix-domain socket speaking length-prefixed
-//! JSON frames, routing two edges onto the actor core: `ping` (request/reply → [`crate::actors::echo`])
-//! and `tail` (`subscribe` + `emit`, streaming → [`crate::actors::ticker`]). The public thin crate uses
-//! JSON frames here; the private `cli` build routes `thepia-proto` instead.
+//! The thepiad control socket (WORK-0047) — a Unix-domain socket speaking length-prefixed JSON frames.
+//!
+//! **Edges are registered adapters, not a hand-wired `match`** (the organisation the spike proves, C2;
+//! the daemon analogue of the command `Target`/`Registry`, ADR-0006/WORK-0038). Each edge is an
+//! [`Edge`] with an `op` key; [`serve`] dispatches a request by **registry lookup**, so adding an edge
+//! is `registry.register(Box::new(MyEdge))` with **zero change to the dispatch or the core**. The
+//! builtin edges are `ping` (request/reply → [`crate::actors::echo`]) and `tail` (`subscribe` + `emit`,
+//! streaming → [`crate::actors::ticker`]). The public thin crate uses JSON frames here; the private
+//! `cli` build routes `thepia-proto`.
 //!
 //! Framing: a 4-byte big-endian length prefix then that many JSON bytes. The length is checked against
 //! [`MAX_FRAME`] **before** a buffer is allocated, so one oversized frame cannot OOM the daemon
 //! (break-finder S6; the daemon has no per-actor memory isolation).
 
+use std::future::Future;
 use std::io;
 use std::path::Path;
+use std::pin::Pin;
+use std::sync::Arc;
 
 use ractor::ActorRef;
 use serde_json::{Value, json};
@@ -60,6 +68,136 @@ async fn write_json<W: AsyncWriteExt + Unpin>(w: &mut W, v: &Value) -> io::Resul
     w.flush().await
 }
 
+// ---- the edge-adapter contract (C2) ----
+
+/// Everything an edge needs to handle one request: the parsed request, the actor core, the connection
+/// to reply on, and the shutdown signal (for long-lived streaming edges).
+pub struct EdgeCtx<'a> {
+    pub req: &'a Value,
+    pub core: &'a Core,
+    pub stream: &'a mut UnixStream,
+    pub shutdown: &'a mut watch::Receiver<bool>,
+}
+
+impl EdgeCtx<'_> {
+    /// A string argument from the request body (`""` if absent).
+    pub fn arg(&self, key: &str) -> &str {
+        self.req.get(key).and_then(|v| v.as_str()).unwrap_or("")
+    }
+
+    /// Write one framed JSON response.
+    pub async fn reply(&mut self, v: &Value) -> io::Result<()> {
+        write_json(self.stream, v).await
+    }
+}
+
+/// The boxed future an [`Edge::handle`] returns (so `dyn Edge` is object-safe).
+pub type EdgeFuture<'a> = Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>>;
+
+/// A control-socket edge: a routable adapter keyed by its `op`.
+pub trait Edge: Send + Sync {
+    /// The request `op` this edge handles (its routing key).
+    fn op(&self) -> &'static str;
+    /// Handle one request on the given connection.
+    fn handle<'a>(&'a self, ctx: EdgeCtx<'a>) -> EdgeFuture<'a>;
+}
+
+/// The live registry of edges. Routing is a lookup, not a `match`, so a new edge is one `register`.
+pub struct EdgeRegistry {
+    edges: Vec<Box<dyn Edge>>,
+}
+
+impl EdgeRegistry {
+    /// The builtin edges: `ping`, `emit`, `subscribe`.
+    pub fn with_builtins() -> Self {
+        let mut r = Self { edges: Vec::new() };
+        r.register(Box::new(PingEdge));
+        r.register(Box::new(EmitEdge));
+        r.register(Box::new(SubscribeEdge));
+        r
+    }
+
+    /// Register an edge (drop-in; no dispatch change).
+    pub fn register(&mut self, edge: Box<dyn Edge>) -> &mut Self {
+        self.edges.push(edge);
+        self
+    }
+
+    /// Route an `op` to its edge.
+    pub fn get(&self, op: &str) -> Option<&dyn Edge> {
+        self.edges.iter().map(|b| b.as_ref()).find(|e| e.op() == op)
+    }
+
+    /// The registered op set (for a drift test).
+    pub fn ops(&self) -> Vec<&'static str> {
+        self.edges.iter().map(|e| e.op()).collect()
+    }
+}
+
+impl Default for EdgeRegistry {
+    fn default() -> Self {
+        Self::with_builtins()
+    }
+}
+
+struct PingEdge;
+impl Edge for PingEdge {
+    fn op(&self) -> &'static str {
+        "ping"
+    }
+    fn handle<'a>(&'a self, mut ctx: EdgeCtx<'a>) -> EdgeFuture<'a> {
+        Box::pin(async move {
+            let msg = ctx.arg("msg").to_string();
+            let reply = ractor::call!(ctx.core.echo, EchoMsg::Ping, msg).map_err(to_io)?;
+            ctx.reply(&json!({ "ok": reply })).await
+        })
+    }
+}
+
+struct EmitEdge;
+impl Edge for EmitEdge {
+    fn op(&self) -> &'static str {
+        "emit"
+    }
+    fn handle<'a>(&'a self, mut ctx: EdgeCtx<'a>) -> EdgeFuture<'a> {
+        Box::pin(async move {
+            let msg = ctx.arg("msg").to_string();
+            ractor::call!(ctx.core.ticker, TickerMsg::Emit, msg).map_err(to_io)?;
+            ctx.reply(&json!({ "ok": "emitted" })).await
+        })
+    }
+}
+
+struct SubscribeEdge;
+impl Edge for SubscribeEdge {
+    fn op(&self) -> &'static str {
+        "subscribe"
+    }
+    fn handle<'a>(&'a self, ctx: EdgeCtx<'a>) -> EdgeFuture<'a> {
+        Box::pin(async move {
+            // Destructure into disjoint locals so the stream write and the shutdown await don't
+            // conflict on a borrow of `ctx`.
+            let core = ctx.core;
+            let stream = ctx.stream;
+            let shutdown = ctx.shutdown;
+            let (tx, mut rx) = mpsc::channel::<String>(256);
+            core.ticker
+                .cast(TickerMsg::SubscribeChannel(tx))
+                .map_err(to_io)?;
+            loop {
+                tokio::select! {
+                    _ = shutdown.changed() => break,
+                    note = rx.recv() => match note {
+                        Some(n) => write_json(stream, &json!({ "note": n })).await?,
+                        None => break,
+                    },
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
 /// Bind the control socket, enforcing single-instance: refuse if another daemon is already listening,
 /// else clear a stale socket file and bind.
 pub async fn bind(path: &Path) -> io::Result<UnixListener> {
@@ -73,8 +211,13 @@ pub async fn bind(path: &Path) -> io::Result<UnixListener> {
     UnixListener::bind(path)
 }
 
-/// Accept connections and route each, until `shutdown` fires (graceful stop).
-pub async fn serve(listener: UnixListener, core: Core, mut shutdown: watch::Receiver<bool>) {
+/// Accept connections and route each through the edge registry, until `shutdown` fires.
+pub async fn serve(
+    listener: UnixListener,
+    core: Core,
+    registry: Arc<EdgeRegistry>,
+    mut shutdown: watch::Receiver<bool>,
+) {
     loop {
         tokio::select! {
             _ = shutdown.changed() => break,
@@ -82,9 +225,10 @@ pub async fn serve(listener: UnixListener, core: Core, mut shutdown: watch::Rece
                 match accepted {
                     Ok((stream, _)) => {
                         let core = core.clone();
+                        let reg = registry.clone();
                         let sd = shutdown.clone();
                         tokio::spawn(async move {
-                            let _ = handle_conn(stream, core, sd).await;
+                            let _ = handle_conn(stream, core, reg, sd).await;
                         });
                     }
                     Err(_) => break,
@@ -97,44 +241,30 @@ pub async fn serve(listener: UnixListener, core: Core, mut shutdown: watch::Rece
 async fn handle_conn(
     mut stream: UnixStream,
     core: Core,
+    registry: Arc<EdgeRegistry>,
     mut shutdown: watch::Receiver<bool>,
 ) -> io::Result<()> {
     let Some(body) = read_frame(&mut stream, MAX_FRAME).await? else {
         return Ok(());
     };
     let req: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-    let op = req.get("op").and_then(|v| v.as_str()).unwrap_or("");
-    let msg = req
-        .get("msg")
+    let op = req
+        .get("op")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
 
-    match op {
-        "ping" => {
-            let reply = ractor::call!(core.echo, EchoMsg::Ping, msg).map_err(to_io)?;
-            write_json(&mut stream, &json!({ "ok": reply })).await?;
+    match registry.get(&op) {
+        Some(edge) => {
+            let ctx = EdgeCtx {
+                req: &req,
+                core: &core,
+                stream: &mut stream,
+                shutdown: &mut shutdown,
+            };
+            edge.handle(ctx).await?;
         }
-        "emit" => {
-            ractor::call!(core.ticker, TickerMsg::Emit, msg).map_err(to_io)?;
-            write_json(&mut stream, &json!({ "ok": "emitted" })).await?;
-        }
-        "subscribe" => {
-            let (tx, mut rx) = mpsc::channel::<String>(256);
-            core.ticker
-                .cast(TickerMsg::SubscribeChannel(tx))
-                .map_err(to_io)?;
-            loop {
-                tokio::select! {
-                    _ = shutdown.changed() => break,
-                    note = rx.recv() => match note {
-                        Some(n) => write_json(&mut stream, &json!({ "note": n })).await?,
-                        None => break,
-                    },
-                }
-            }
-        }
-        _ => write_json(&mut stream, &json!({ "err": "unknown op" })).await?,
+        None => write_json(&mut stream, &json!({ "err": "unknown op" })).await?,
     }
     Ok(())
 }

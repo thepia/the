@@ -6,9 +6,10 @@
 //! (a debug/dev flag), `--emit-conformance <path>` writes the WORK-0047 claim report instead.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use ractor::Actor;
-use the_daemon::socket::{self, Core};
+use the_daemon::socket::{self, Core, EdgeRegistry};
 use the_daemon::{Echo, Ticker};
 use tokio::sync::watch;
 
@@ -57,7 +58,8 @@ async fn run_daemon() {
     eprintln!("thepiad: listening on {}", path.display());
 
     let (sd_tx, sd_rx) = watch::channel(false);
-    let server = tokio::spawn(socket::serve(listener, core, sd_rx));
+    let registry = Arc::new(EdgeRegistry::with_builtins());
+    let server = tokio::spawn(socket::serve(listener, core, registry, sd_rx));
 
     wait_for_shutdown().await;
 
