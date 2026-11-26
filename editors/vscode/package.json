@@ -1,0 +1,71 @@
+{
+  "name": "thepia-agent-config",
+  "displayName": "Thepia Agent Config",
+  "description": "Live diagnostics for SKILL.md and agent-definition files, served by the thepiad language server.",
+  "version": "0.1.0",
+  "publisher": "thepia",
+  "license": "MIT OR Apache-2.0",
+  "homepage": "https://thepia.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Thepia/the.git",
+    "directory": "editors/vscode"
+  },
+  "bugs": "https://github.com/Thepia/the/issues",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Linters",
+    "Programming Languages"
+  ],
+  "keywords": [
+    "thepia",
+    "agent-skills",
+    "skills",
+    "lint",
+    "claude-code"
+  ],
+  "activationEvents": [
+    "workspaceContains:**/SKILL.md",
+    "workspaceContains:**/.claude/agents/**/*.md"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "Thepia Agent Config",
+      "properties": {
+        "thepia.lsp.serverPath": {
+          "type": "string",
+          "default": "thepiad",
+          "markdownDescription": "Path to the `thepiad` binary that hosts the language server. Defaults to `thepiad` on `PATH`; set an absolute path (e.g. a `target/release/thepiad`) for a local build."
+        },
+        "thepia.lsp.serverArgs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["--lsp"],
+          "description": "Arguments passed to the server binary. The server is started over stdio."
+        },
+        "thepia.lsp.trace.server": {
+          "type": "string",
+          "enum": ["off", "messages", "verbose"],
+          "default": "off",
+          "description": "Trace the JSON-RPC traffic between VS Code and the thepiad language server."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.75.0",
+    "typescript": "^5.4.0"
+  }
+}
