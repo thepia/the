@@ -28,6 +28,23 @@ run *args:
     . scripts/sccache-env.sh
     cargo run --quiet --bin the -- {{args}}
 
+# Emit the thepiad conformance report (WORK-0047) to target/daemon-conformance-report.json, behind
+# the `conformance` cargo feature (a debug/dev flag). The spec repo's `just daemon-conformance`
+# reconciles it against the claim manifest. Repeatable; needs no running daemon.
+conformance-report:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    . scripts/sccache-env.sh
+    cargo run --quiet --features conformance --bin thepiad -- --emit-conformance target/daemon-conformance-report.json
+
+# Measure thepiad latency (WORK-0047): in-process actor-call overhead + control-socket ping
+# round-trip (p50/p99/max), behind the `conformance` dev feature. Prints numbers; not a gate.
+perf:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    . scripts/sccache-env.sh
+    cargo run --quiet --release --features conformance --bin thepiad -- --perf
+
 # Unit tests only (the pre-commit hook gate).
 test-unit:
     #!/usr/bin/env bash
