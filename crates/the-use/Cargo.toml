@@ -1,0 +1,21 @@
+# `the use` — install and enable Thepia features ("use subjects").
+#
+# `thepia use` is a general install-and-enable surface driven by a central registry of use subjects
+# (one descriptor row + impl per feature), not a bag of match arms: `thepia use +<subject>` installs
+# and enables a feature and configures it to run from then on, `-<subject>` disables it, a bare
+# `thepia use` lists them. The first subject is `language-server` (the thepiad agent-config LSP). The
+# command group is a routable `the_output::command::Target`, registered into the `the` pipeline.
+[package]
+name = "the-use"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+the-output = { path = "../the-output", version = "0.4.0" }
+clap.workspace = true
+# ~/.thepia/config.toml, edited in place (comments/formatting preserved) to record enabled subjects.
+toml_edit.workspace = true

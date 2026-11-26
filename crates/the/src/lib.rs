@@ -16,6 +16,7 @@ fn registry() -> Registry {
     Registry::new()
         .register(Box::new(the_skills::Skills))
         .register(Box::new(the_agents::Agents))
+        .register(Box::new(the_use::Use))
 }
 
 pub fn run() -> ExitCode {

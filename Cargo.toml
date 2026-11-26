@@ -23,6 +23,9 @@ serde_json = "1"
 yaml-rust2 = "0.13"
 # Unicode NFKC normalization for name-vs-directory matching (reference-validator parity). Pure Rust.
 unicode-normalization = "0.1"
+# `thepia use` subject state: ~/.thepia/config.toml, edited in place so the user's comments/layout
+# survive a round-trip (toml_edit preserves formatting; plain `toml` would rewrite the whole file).
+toml_edit = "0.22"
 # thepiad daemon (WORK-0047 spike): async runtime + the actor system (ADR-0007: Tokio + ractor).
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "io-std", "signal"] }
 ractor = "0.15"
