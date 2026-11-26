@@ -13,6 +13,7 @@
 
 pub mod actors;
 pub mod ahp;
+pub mod lsp;
 pub mod socket;
 pub mod watchdog;
 

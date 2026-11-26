@@ -95,6 +95,15 @@ fn main() {
         }
     }
 
+    // The agent-config language server (stdio). A real feature, not behind the dev feature.
+    if std::env::args().skip(1).any(|a| a == "--lsp") {
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        if let Err(e) = rt.block_on(the_daemon::lsp::run_stdio()) {
+            eprintln!("thepiad lsp: {e}");
+        }
+        return;
+    }
+
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     rt.block_on(run_daemon());
 }

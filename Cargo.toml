@@ -24,7 +24,7 @@ yaml-rust2 = "0.13"
 # Unicode NFKC normalization for name-vs-directory matching (reference-validator parity). Pure Rust.
 unicode-normalization = "0.1"
 # thepiad daemon (WORK-0047 spike): async runtime + the actor system (ADR-0007: Tokio + ractor).
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "io-std", "signal"] }
 ractor = "0.15"
 # AHP host (WORK-0046 #2): WebSocket + JSON-RPC. `handshake` only (no TLS; local ws://), + stream combinators.
 tokio-tungstenite = { version = "0.26", default-features = false, features = ["handshake"] }

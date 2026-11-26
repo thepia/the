@@ -791,6 +791,8 @@ dependencies = [
  "futures-util",
  "ractor",
  "serde_json",
+ "the-agents",
+ "the-skills",
  "tokio",
  "tokio-tungstenite",
 ]

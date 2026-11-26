@@ -27,6 +27,9 @@ serde_json = { workspace = true }
 # AHP host: WebSocket + JSON-RPC.
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
+# The agent-config language server lints SKILL.md / agent definitions via the existing lint engines.
+the-skills = { path = "../the-skills", version = "0.4.0" }
+the-agents = { path = "../the-agents", version = "0.4.0" }
 
 [features]
 # A debug/dev compile flag: compiles in the conformance self-report (`thepiad --emit-conformance
