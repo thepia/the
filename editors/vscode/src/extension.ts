@@ -6,6 +6,9 @@
 // transport glue. Under Remote-SSH it works unchanged: vscode-server runs the extension host on the
 // remote node, so `thepiad` is launched there, next to the files it lints.
 
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
 import * as vscode from "vscode";
 import {
   LanguageClient,
@@ -16,9 +19,23 @@ import {
 
 let client: LanguageClient | undefined;
 
+// Resolve the server command. `thepia use +language-server` installs thepiad to ~/.thepia/bin, which
+// is not necessarily on a GUI VS Code's PATH, so when the setting is left at the default `thepiad` we
+// prefer that known install path and fall back to a PATH lookup. An explicit serverPath is honored
+// verbatim (with a leading `~` expanded).
+function resolveCommand(configured: string): string {
+  if (configured !== "thepiad") {
+    return configured.startsWith("~/")
+      ? path.join(os.homedir(), configured.slice(2))
+      : configured;
+  }
+  const installed = path.join(os.homedir(), ".thepia", "bin", "thepiad");
+  return fs.existsSync(installed) ? installed : "thepiad";
+}
+
 function makeClient(): LanguageClient {
   const cfg = vscode.workspace.getConfiguration("thepia.lsp");
-  const command = cfg.get<string>("serverPath", "thepiad");
+  const command = resolveCommand(cfg.get<string>("serverPath", "thepiad"));
   const args = cfg.get<string[]>("serverArgs", ["--lsp"]);
 
   // One server process, speaking stdio. `the` lint engines are synchronous, so no special env is needed.

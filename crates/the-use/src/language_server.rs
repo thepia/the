@@ -12,7 +12,37 @@ use std::path::{Path, PathBuf};
 
 use the_output::diag::{Diagnostic, Exit};
 
+use crate::install::{self, Outcome};
 use crate::{Subject, SubjectOutcome, SubjectProbe, UseEnv, which};
+
+/// Phrase an [`install::Outcome`] as a user note (what happened to `~/.thepia/bin/thepiad`).
+fn install_note(outcome: &Outcome, dest: &std::path::Path) -> Diagnostic {
+    let v = |o: &Option<String>| o.clone().unwrap_or_else(|| "?".to_string());
+    match outcome {
+        Outcome::Installed { version } => Diagnostic::note(
+            "ls-installed",
+            format!("installed thepiad {} to {}", v(version), dest.display()),
+        ),
+        Outcome::Upgraded { from, to } => Diagnostic::note(
+            "ls-upgraded",
+            format!(
+                "upgraded thepiad {} -> {} at {}",
+                v(from),
+                v(to),
+                dest.display()
+            ),
+        ),
+        Outcome::Kept { dest: d, src } => Diagnostic::note(
+            "ls-kept",
+            format!(
+                "kept existing thepiad {} at {} (source {} is not newer)",
+                v(d),
+                dest.display(),
+                v(src)
+            ),
+        ),
+    }
+}
 
 /// The binary that hosts the language server (`thepiad --lsp`).
 const BINARY: &str = "thepiad";
@@ -25,21 +55,19 @@ impl LanguageServer {
         env.bin_dir().join(BINARY)
     }
 
-    /// Find a `thepiad` to install, preferring (1) one already installed at the destination, (2) a
-    /// sibling of the running `thepia` executable (the two are distributed together), (3) `thepiad`
-    /// on `$PATH`. Returns the source path, or `None` if none is found.
+    /// Find an *external* `thepiad` to install from (not the destination itself, which is what we
+    /// compare against): (1) a sibling of the running `thepia` executable (the two are distributed
+    /// together), else (2) `thepiad` on `$PATH`. `None` if none is found.
     fn locate_source(env: &UseEnv) -> Option<PathBuf> {
         let dest = Self::dest(env);
-        if dest.is_file() {
-            return Some(dest);
-        }
         if let Some(exe) = env.exe()
             && let Some(sib) = exe.parent().map(|d| d.join(BINARY))
             && sib.is_file()
+            && sib != dest
         {
             return Some(sib);
         }
-        which(BINARY)
+        which(BINARY).filter(|p| *p != dest)
     }
 }
 
@@ -71,15 +99,29 @@ impl Subject for LanguageServer {
     fn activate(&self, env: &UseEnv) -> Result<SubjectOutcome, Diagnostic> {
         let dest = Self::dest(env);
 
-        // 1. Install the binary to ~/.thepia/bin, unless it is already the one there.
-        let installed_note = if dest.is_file() {
-            Diagnostic::note(
+        // 1. Install the binary to ~/.thepia/bin, version-aware: install if absent, upgrade only when
+        // the source is strictly newer, never overwrite a newer-or-equal destination.
+        let installed_note = match Self::locate_source(env) {
+            Some(source) => {
+                let outcome = install::ensure(&source, &dest).map_err(|e| {
+                    Diagnostic::error("ls-install", "could not install thepiad")
+                        .cause(format!(
+                            "install {} -> {}: {e}",
+                            source.display(),
+                            dest.display()
+                        ))
+                        .exit(Exit::Generic)
+                })?;
+                install_note(&outcome, &dest)
+            }
+            // No external source. If a thepiad is already installed, that is fine (nothing to
+            // upgrade from); otherwise there is nothing to install.
+            None if dest.is_file() => Diagnostic::note(
                 "ls-installed",
-                format!("thepiad already at {}", dest.display()),
-            )
-        } else {
-            let source = Self::locate_source(env).ok_or_else(|| {
-                Diagnostic::error(
+                format!("thepiad already installed at {}", dest.display()),
+            ),
+            None => {
+                return Err(Diagnostic::error(
                     "thepiad-not-found",
                     "cannot find a `thepiad` binary to install",
                 )
@@ -88,26 +130,8 @@ impl Subject for LanguageServer {
                     "build it with `just build` (or `cargo build --release -p the-daemon`) and \
                      ensure `thepiad` is on PATH, then re-run `thepia use +language-server`",
                 )
-                .exit(Exit::NotFound)
-            })?;
-            std::fs::create_dir_all(env.bin_dir()).map_err(|e| {
-                Diagnostic::error("ls-mkdir", "could not create ~/.thepia/bin")
-                    .cause(e.to_string())
-                    .exit(Exit::Generic)
-            })?;
-            std::fs::copy(&source, &dest).map_err(|e| {
-                Diagnostic::error("ls-install", "could not install thepiad")
-                    .cause(format!(
-                        "copy {} -> {}: {e}",
-                        source.display(),
-                        dest.display()
-                    ))
-                    .exit(Exit::Generic)
-            })?;
-            Diagnostic::note(
-                "ls-installed",
-                format!("installed thepiad to {}", dest.display()),
-            )
+                .exit(Exit::NotFound));
+            }
         };
 
         // 2. Record the enable in ~/.thepia/config.toml.
@@ -202,11 +226,13 @@ mod tests {
     fn activate_installs_and_enables_then_deactivate_keeps_binary() {
         let home = temp_home("activate");
 
-        // A fake `thepiad` beside a fake `thepia` exe, so locate_source finds a sibling.
+        // A fake versioned `thepiad` beside a fake `thepia` exe, so locate_source finds a sibling.
+        use std::os::unix::fs::PermissionsExt;
         let fake_bin = home.join("dist");
         std::fs::create_dir_all(&fake_bin).unwrap();
         let fake_thepiad = fake_bin.join("thepiad");
-        std::fs::write(&fake_thepiad, b"#!/bin/sh\n").unwrap();
+        std::fs::write(&fake_thepiad, b"#!/bin/sh\necho \"thepiad 0.4.0\"\n").unwrap();
+        std::fs::set_permissions(&fake_thepiad, std::fs::Permissions::from_mode(0o755)).unwrap();
         let env = UseEnv::at(&home).with_exe(fake_bin.join("thepia"));
 
         // Not installed, but discoverable.
@@ -220,12 +246,12 @@ mod tests {
         assert!(out.notes.iter().any(|n| n.code == "ls-installed"));
         assert!(out.notes.iter().any(|n| n.code == "ls-editor"));
 
-        // Idempotent: re-activate reports already-installed, stays enabled.
+        // Idempotent: re-activate keeps the equal-version binary, stays enabled.
         let out2 = LanguageServer.activate(&env).unwrap();
         assert!(
             out2.notes
                 .iter()
-                .any(|n| n.title.contains("already at") || n.code == "ls-installed")
+                .any(|n| n.code == "ls-kept" || n.code == "ls-installed")
         );
         assert_eq!(env.enabled_subjects(), vec!["language-server".to_string()]);
         assert!(LanguageServer.probe(&env).installed);

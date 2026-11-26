@@ -26,6 +26,7 @@ use the_output::diag::Diagnostic;
 
 pub mod cli;
 pub mod cmd;
+pub mod install;
 pub mod language_server;
 
 pub use cmd::Use;

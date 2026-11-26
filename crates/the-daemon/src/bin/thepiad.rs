@@ -71,14 +71,39 @@ async fn run_daemon() {
     let _ = std::fs::remove_file(&path);
 }
 
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+const USAGE: &str = "thepiad — the Thepia communications-hub daemon
+
+USAGE:
+    thepiad [--socket <path>]   run the daemon, serving the control socket
+    thepiad --lsp               run the agent-config language server over stdio (VS Code)
+    thepiad --version, -V       print the version
+    thepiad --help, -h          print this help
+";
+
 fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+
+    // Version/help are plain, non-daemon modes: the version string is the stdout result; help goes
+    // to stdout too (it is the requested output), each exiting 0 without touching the daemon.
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("thepiad {VERSION}");
+        return;
+    }
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        print!("{USAGE}");
+        return;
+    }
+
     #[cfg(feature = "conformance")]
     {
-        let mut args = std::env::args().skip(1);
-        while let Some(arg) = args.next() {
+        let mut it = args.iter();
+        while let Some(arg) = it.next() {
             if arg == "--emit-conformance" {
-                let path = args
+                let path = it
                     .next()
+                    .cloned()
                     .unwrap_or_else(|| "daemon-conformance-report.json".to_string());
                 let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
                 let report = rt.block_on(the_daemon::conformance::run());
@@ -96,7 +121,7 @@ fn main() {
     }
 
     // The agent-config language server (stdio). A real feature, not behind the dev feature.
-    if std::env::args().skip(1).any(|a| a == "--lsp") {
+    if args.iter().any(|a| a == "--lsp") {
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         if let Err(e) = rt.block_on(the_daemon::lsp::run_stdio()) {
             eprintln!("thepiad lsp: {e}");
@@ -104,6 +129,27 @@ fn main() {
         return;
     }
 
+    // The only flag the daemon mode itself accepts is `--socket <path>`. Reject anything else with a
+    // usage error instead of silently starting the daemon on a typo (e.g. `thepiad --verison`).
+    if let Some(bad) = unknown_daemon_arg(&args) {
+        eprintln!("thepiad: unrecognized argument `{bad}`\n\n{USAGE}");
+        std::process::exit(2);
+    }
+
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     rt.block_on(run_daemon());
+}
+
+/// The first argument that daemon mode does not understand (everything except `--socket <path>`),
+/// or `None` if the arguments are all valid for `run_daemon`.
+fn unknown_daemon_arg(args: &[String]) -> Option<String> {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--socket" {
+            it.next(); // consume the path value
+        } else {
+            return Some(a.clone());
+        }
+    }
+    None
 }
